@@ -40,6 +40,10 @@ cargo install --git https://github.com/christopher-kapic/kctx-local.git
 ## Quick Start
 
 ```bash
+# Initialize kcl — detects installed harnesses, writes config, creates the
+# database, and generates shell completions
+kcl init
+
 # Register a local codebase
 kcl packages add my-project --path /path/to/project
 

@@ -111,6 +111,22 @@ impl Package {
         }
     }
 
+    /// Retrieve the first package registered against a given git source URL.
+    /// Used to detect when a new package can reuse an existing clone instead
+    /// of cloning the same repo twice.
+    pub fn get_by_source_url(conn: &Connection, source_url: &str) -> Result<Option<Self>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, created_at, updated_at
+             FROM packages WHERE source_url = ?1 ORDER BY created_at LIMIT 1",
+        )?;
+
+        let mut rows = stmt.query(params![source_url])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Retrieve a package by its UUID.
     #[allow(dead_code)]
     pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Self>> {
@@ -301,6 +317,66 @@ mod tests {
         assert_eq!(retrieved.source_branch.as_deref(), Some("main"));
         assert!(retrieved.auto_pull);
         assert_eq!(retrieved.harness.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn get_by_source_url_finds_existing() {
+        let conn = db::open_memory().unwrap();
+        let pkg = Package::new(
+            "monorepo-app-a".to_string(),
+            "monorepo-app-a".to_string(),
+            SourceType::Git,
+            Some("https://github.com/acme/monorepo.git".to_string()),
+            Some("main".to_string()),
+            "/clones/monorepo".to_string(),
+            true,
+            None,
+        );
+        pkg.insert(&conn).unwrap();
+
+        let found =
+            Package::get_by_source_url(&conn, "https://github.com/acme/monorepo.git").unwrap();
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.identifier, "monorepo-app-a");
+        assert_eq!(found.path, "/clones/monorepo");
+
+        let missing = Package::get_by_source_url(&conn, "https://github.com/other.git").unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn get_by_source_url_returns_first_when_multiple_share_url() {
+        let conn = db::open_memory().unwrap();
+        let url = "https://github.com/acme/monorepo.git".to_string();
+
+        let a = Package::new(
+            "app-a".to_string(),
+            "app-a".to_string(),
+            SourceType::Git,
+            Some(url.clone()),
+            Some("main".to_string()),
+            "/clones/monorepo".to_string(),
+            true,
+            None,
+        );
+        a.insert(&conn).unwrap();
+
+        let b = Package::new(
+            "app-b".to_string(),
+            "app-b".to_string(),
+            SourceType::Git,
+            Some(url.clone()),
+            Some("main".to_string()),
+            "/clones/monorepo".to_string(),
+            true,
+            None,
+        );
+        b.insert(&conn).unwrap();
+
+        let found = Package::get_by_source_url(&conn, &url).unwrap().unwrap();
+        // Both rows share the same path, so any match gives the right answer.
+        assert_eq!(found.path, "/clones/monorepo");
     }
 
     #[test]

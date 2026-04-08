@@ -107,6 +107,26 @@ fn cmd_add(
                 abs,
                 true,
             )
+        } else if let Some(existing) = Package::get_by_source_url(&conn, git_url)? {
+            // A previously-registered package already points at this git URL —
+            // reuse its on-disk clone instead of cloning a second time. This
+            // lets monorepos be registered under multiple identifiers.
+            let pkg_dir = std::path::PathBuf::from(&existing.path);
+            eprintln!(
+                "reusing existing clone at {} (already registered as '{}')",
+                existing.path, existing.identifier
+            );
+            let recorded_branch = match branch {
+                Some(b) => Some(b.to_string()),
+                None => git::current_branch(&pkg_dir).ok(),
+            };
+            (
+                SourceType::Git,
+                Some(git_url.to_string()),
+                recorded_branch,
+                existing.path,
+                true,
+            )
         } else {
             // Clone the repo to clone_dir/<identifier>. When the user didn't
             // pass --branch we let git pick the remote's default branch
@@ -466,6 +486,51 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(updated.harness.is_none());
+    }
+
+    #[test]
+    fn second_git_package_with_same_url_reuses_path() {
+        // Simulates `kcl packages add app-b --git <url>` after app-a already
+        // exists for the same URL: lookup returns the existing path so the
+        // caller can skip cloning.
+        let conn = db::open_memory().unwrap();
+        let url = "https://github.com/acme/monorepo.git";
+
+        let first = Package::new(
+            "app-a".to_string(),
+            "app-a".to_string(),
+            SourceType::Git,
+            Some(url.to_string()),
+            Some("main".to_string()),
+            "/clones/monorepo".to_string(),
+            true,
+            None,
+        );
+        first.insert(&conn).unwrap();
+
+        // The cmd_add code path queries by source_url before cloning.
+        let existing = Package::get_by_source_url(&conn, url).unwrap();
+        assert!(existing.is_some());
+        let existing = existing.unwrap();
+        assert_eq!(existing.path, "/clones/monorepo");
+
+        // Insert the second package reusing that path.
+        let second = Package::new(
+            "app-b".to_string(),
+            "app-b".to_string(),
+            SourceType::Git,
+            Some(url.to_string()),
+            Some("main".to_string()),
+            existing.path.clone(),
+            true,
+            None,
+        );
+        second.insert(&conn).unwrap();
+
+        let app_a = Package::get_by_identifier(&conn, "app-a").unwrap().unwrap();
+        let app_b = Package::get_by_identifier(&conn, "app-b").unwrap().unwrap();
+        assert_eq!(app_a.path, app_b.path);
+        assert_ne!(app_a.id, app_b.id);
     }
 
     #[test]
