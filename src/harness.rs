@@ -45,16 +45,16 @@ pub fn build_prompt(
         display_name, identifier
     );
 
-    if let Some(recent_questions) = context {
-        if !recent_questions.is_empty() {
-            prompt.push_str(
-                "\nRecent questions asked about this package (for context, avoid re-exploring these topics):\n",
-            );
-            for q in recent_questions {
-                prompt.push_str(&format!("- {}\n", q));
-            }
-            prompt.push('\n');
+    if let Some(recent_questions) = context
+        && !recent_questions.is_empty()
+    {
+        prompt.push_str(
+            "\nRecent questions asked about this package (for context, avoid re-exploring these topics):\n",
+        );
+        for q in recent_questions {
+            prompt.push_str(&format!("- {}\n", q));
         }
+        prompt.push('\n');
     }
 
     prompt.push_str(&format!(
@@ -109,14 +109,14 @@ pub async fn run_harness(
         .with_context(|| format!("spawning harness command: {}", harness.command))?;
 
     // Write prompt to stdin if using stdin mode
-    if harness.prompt_mode == PromptMode::Stdin {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(prompt.as_bytes())
-                .await
-                .context("writing prompt to harness stdin")?;
-            // Drop stdin to close it, signaling EOF
-        }
+    if harness.prompt_mode == PromptMode::Stdin
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .context("writing prompt to harness stdin")?;
+        // Drop stdin to close it, signaling EOF
     }
 
     let stdout_pipe = child.stdout.take().expect("stdout should be piped");

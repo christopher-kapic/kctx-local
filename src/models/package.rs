@@ -47,6 +47,7 @@ pub struct Package {
 
 impl Package {
     /// Create a new Package with a generated UUID and current timestamps.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         identifier: String,
         display_name: String,

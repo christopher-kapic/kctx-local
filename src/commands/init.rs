@@ -185,10 +185,10 @@ fn build_harness_map(detected: &[String]) -> HashMap<String, HarnessConfig> {
     }
 
     // If no harnesses were detected, still include claude as the default template
-    if map.is_empty() {
-        if let Some(claude) = known.get("claude") {
-            map.insert("claude".to_string(), claude.clone());
-        }
+    if map.is_empty()
+        && let Some(claude) = known.get("claude")
+    {
+        map.insert("claude".to_string(), claude.clone());
     }
 
     map
