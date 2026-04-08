@@ -1,0 +1,77 @@
+# kcl — Local Code Knowledge CLI
+
+A Rust CLI that gives agents and humans instant Q&A access to any codebase on the local machine. Clones repos to disk and invokes coding harnesses (Claude Code, opencode, copilot, etc.) in non-interactive mode to answer queries. No server, no API keys for kcl itself.
+
+## Design Spec
+
+The full design spec is in `kcl-plan.md` at the project root. Read it before making changes.
+
+## Tech Stack
+
+- **Language:** Rust
+- **CLI:** clap v4 with derive macros
+- **Database:** rusqlite with bundled feature (zero system deps)
+- **Async:** tokio (for subprocess management and streaming)
+- **Serialization:** serde + serde_json
+- **Platform dirs:** dirs crate
+- **Error handling:** anyhow + thiserror
+
+## Project Structure
+
+```
+src/
+  main.rs              — Entry point, clap CLI dispatch
+  cli.rs               — Clap command/arg definitions
+  config.rs            — Config loading (~/.config/kcl/config.json)
+  db.rs                — SQLite connection, migrations
+  dirs.rs              — Platform directory resolution
+  models/
+    package.rs         — Package struct + CRUD
+    conversation.rs    — Conversation index + CRUD
+  harness.rs           — Subprocess spawning, prompt building, streaming + capture
+  git.rs               — Clone, pull operations (shells out to system git)
+  commands/
+    ask.rs             — kcl ask handler
+    packages.rs        — kcl packages handler
+    history.rs         — kcl history handler
+    config_cmd.rs      — kcl config handler
+    init.rs            — kcl init handler
+```
+
+## Key Design Decisions
+
+- **JSON config** at `~/.config/kcl/config.json`
+- **SQLite database** at platform-appropriate data dir (`~/.local/share/kcl/kcl.db` on Linux)
+- **Conversation logs** as JSON files at `~/.local/state/kcl/logs/<package>/<timestamp>-<id>.json`
+- **Conversation index** in SQLite for fast listing/filtering; full logs on disk
+- **Shell out to `git`** rather than libgit2 — simpler, respects user's git config/SSH
+- **Exit codes:** 0 = success, 1 = kcl error, 2 = harness error
+- **Agent-friendly output:** `--json` flag on read commands, terse defaults, no color in non-TTY
+
+## Querying Dependencies with kctx
+
+This project's coding agents have access to **kctx** — a dependency knowledge service. Use the `mcp__kctx__query_dependency` and `mcp__kctx__list_dependencies` MCP tools to ask usage questions about external libraries.
+
+Relevant dependencies available via kctx:
+- `claude-code` — Claude Code CLI (harness reference)
+- `opencode` — OpenCode CLI (harness reference)
+- `copilot-cli` — GitHub Copilot CLI (harness reference)
+- `pi` — Pi CLI (harness reference)
+- `codex` — Codex CLI (harness reference)
+
+## Solved Problems
+
+The following solved problems (via `mcp__sp__get_solved_problems`) are relevant:
+- `rust-cli-github-releases-install-script-distribution` — GitHub Releases + install script for Rust CLI distribution. Use this when setting up CI/CD and distribution.
+
+## Build & Test
+
+```bash
+cargo build
+cargo test
+```
+
+## Related Projects
+
+- **kctx** (sibling at `../kctx/`) — Server-based MCP dependency knowledge service. kcl is the local-first complement.
+- **ralph2** (sibling at `../ralph2/`) — Agentic planning orchestrator. Uses similar Rust patterns (clap, serde, tokio, dirs).
