@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="header.png" alt="kcl — Local Code Knowledge CLI" />
+</p>
+
 # kcl — Local Code Knowledge CLI
 
 The binary is `kcl`, short for **kinetic context local**.
