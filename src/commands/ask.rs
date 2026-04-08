@@ -72,6 +72,14 @@ pub fn run(
 
     let timeout = timeout_override.unwrap_or(config.default_timeout);
 
+    // Resolve the effective model: CLI flag wins, otherwise fall back to the
+    // harness's configured `default_model` (if any). The resolved value is
+    // forwarded to the harness and recorded in the conversation log so users
+    // can tell which model actually answered.
+    let effective_model: Option<String> = model
+        .map(|s| s.to_string())
+        .or_else(|| harness_config.default_model.clone());
+
     // 3a. If --branch was supplied, check it out (saving the current branch
     //     so we can restore it after the harness runs). Branch overrides are
     //     only meaningful for git packages.
@@ -147,7 +155,7 @@ pub fn run(
         &cwd,
         timeout,
         true, // stream stdout to caller
-        model,
+        effective_model.as_deref(),
     ));
 
     let finished_at = Utc::now();
@@ -175,10 +183,10 @@ pub fn run(
     std::fs::create_dir_all(&pkg_log_dir)?;
 
     // Only record the model in the log if the harness actually accepted it.
-    // (model_args being non-empty is the signal that --model was forwarded.)
-    let logged_model = model
-        .filter(|_| !harness_config.model_args.is_empty())
-        .map(|s| s.to_string());
+    // (model_args being non-empty is the signal that the model was forwarded.)
+    let logged_model = effective_model
+        .clone()
+        .filter(|_| !harness_config.model_args.is_empty());
 
     let log = ConversationLog {
         id: conv_id.clone(),

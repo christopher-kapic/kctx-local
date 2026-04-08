@@ -51,6 +51,8 @@ fn main() -> Result<()> {
 
         Command::Config { command } => commands::config_cmd::run(command),
 
+        Command::Harnesses { command } => commands::harnesses::run(command),
+
         Command::Init { non_interactive } => commands::init::run(*non_interactive),
     }
 }

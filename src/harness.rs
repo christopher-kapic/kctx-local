@@ -275,6 +275,7 @@ mod tests {
             ],
             prompt_mode: PromptMode::Arg,
             model_args: vec![],
+            default_model: None,
         };
 
         let args = build_args(&harness, "test prompt", None);
@@ -291,6 +292,7 @@ mod tests {
             ],
             prompt_mode: PromptMode::Arg,
             model_args: vec![],
+            default_model: None,
         };
 
         let args = build_args(&harness, "my question", None);
@@ -304,6 +306,7 @@ mod tests {
             args: vec!["--query".to_string()],
             prompt_mode: PromptMode::Stdin,
             model_args: vec![],
+            default_model: None,
         };
 
         let args = build_args(&harness, "test prompt", None);
@@ -319,6 +322,7 @@ mod tests {
             args: vec!["-p".to_string(), "{prompt}".to_string()],
             prompt_mode: PromptMode::Arg,
             model_args: vec!["--model".to_string(), "{model}".to_string()],
+            default_model: None,
         };
 
         let args = build_args(&harness, "the question", Some("claude-sonnet-4.6"));
@@ -335,6 +339,7 @@ mod tests {
             args: vec!["-p".to_string(), "{prompt}".to_string()],
             prompt_mode: PromptMode::Arg,
             model_args: vec![], // empty: harness has no model flag
+            default_model: None,
         };
 
         let args = build_args(&harness, "q", Some("some-model"));
@@ -348,6 +353,7 @@ mod tests {
             args: vec!["-p".to_string(), "{prompt}".to_string()],
             prompt_mode: PromptMode::Arg,
             model_args: vec!["--model".to_string(), "{model}".to_string()],
+            default_model: None,
         };
 
         let args = build_args(&harness, "q", None);
@@ -361,6 +367,7 @@ mod tests {
             args: vec!["{prompt}".to_string()],
             prompt_mode: PromptMode::Arg,
             model_args: vec!["--model={model}".to_string()],
+            default_model: None,
         };
 
         let args = build_args(&harness, "q", Some("gpt-4"));
@@ -374,6 +381,7 @@ mod tests {
             args: vec!["hello from harness".to_string()],
             prompt_mode: PromptMode::Arg,
             model_args: vec![],
+            default_model: None,
         };
 
         let cwd = std::env::temp_dir();
@@ -392,6 +400,7 @@ mod tests {
             args: vec!["-c".to_string(), "exit 42".to_string()],
             prompt_mode: PromptMode::Arg,
             model_args: vec![],
+            default_model: None,
         };
 
         let cwd = std::env::temp_dir();
@@ -409,6 +418,7 @@ mod tests {
             args: vec!["-c".to_string(), "echo out; echo err >&2".to_string()],
             prompt_mode: PromptMode::Arg,
             model_args: vec![],
+            default_model: None,
         };
 
         let cwd = std::env::temp_dir();
@@ -428,6 +438,7 @@ mod tests {
             args: vec![],
             prompt_mode: PromptMode::Stdin,
             model_args: vec![],
+            default_model: None,
         };
 
         let cwd = std::env::temp_dir();
@@ -446,6 +457,7 @@ mod tests {
             args: vec!["{prompt}".to_string()],
             prompt_mode: PromptMode::Arg,
             model_args: vec![],
+            default_model: None,
         };
 
         let cwd = std::env::temp_dir();
@@ -464,6 +476,7 @@ mod tests {
             args: vec!["60".to_string()],
             prompt_mode: PromptMode::Arg,
             model_args: vec![],
+            default_model: None,
         };
 
         let cwd = std::env::temp_dir();

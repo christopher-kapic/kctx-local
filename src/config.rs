@@ -48,6 +48,13 @@ pub struct HarnessConfig {
     /// - `["-m", "{model}"]` — short flag
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_args: Vec<String>,
+
+    /// Optional model identifier used when the user does not pass `--model`
+    /// to `kcl ask`. Forwarded through `model_args` exactly as if the user
+    /// had supplied it on the command line. Ignored when `model_args` is
+    /// empty (the harness has no way to receive a model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -217,6 +224,7 @@ mod tests {
                 args: vec!["-p".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
+                default_model: None,
             },
         );
 
@@ -238,6 +246,7 @@ mod tests {
                 args: vec!["-p".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
+                default_model: None,
             },
         );
 

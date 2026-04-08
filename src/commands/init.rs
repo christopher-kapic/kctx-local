@@ -25,6 +25,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 ],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
+                default_model: None,
             },
         ),
         (
@@ -39,6 +40,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 ],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
+                default_model: None,
             },
         ),
         (
@@ -55,6 +57,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 // copilot uses `=`-style: `--model=<name>` (e.g.
                 // `--model=claude-sonnet-4.6` or `--model=gpt-5.2`).
                 model_args: vec!["--model={model}".to_string()],
+                default_model: None,
             },
         ),
         (
@@ -66,6 +69,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 // Pi accepts `--model <pattern>` (e.g. `gpt-4o-mini`,
                 // `openai/gpt-4o`, `sonnet:high`).
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
+                default_model: None,
             },
         ),
         (
@@ -78,19 +82,26 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 // the full provider/model string as the --model value
                 // (e.g. `anthropic/claude-sonnet-4-20250514`).
                 model_args: vec!["-m".to_string(), "{model}".to_string()],
+                default_model: None,
             },
         ),
         (
             "codex",
             HarnessConfig {
                 command: "codex".to_string(),
-                args: vec!["-p".to_string(), "{prompt}".to_string()],
+                // codex's non-interactive entrypoint is the `exec`
+                // subcommand. Prompt is a positional arg. `--full-auto`
+                // auto-approves actions while keeping the workspace-write
+                // sandbox so we don't escape the package directory.
+                args: vec![
+                    "exec".to_string(),
+                    "--full-auto".to_string(),
+                    "{prompt}".to_string(),
+                ],
                 prompt_mode: PromptMode::Arg,
-                // Codex accepts `-m <model>` / `--model <model>`.
-                // Note: codex's actual non-interactive invocation is
-                // `codex exec ...`, not `codex -p ...` — the default `args`
-                // above mirrors the original plan and may need a follow-up.
+                // codex accepts `-m <model>` / `--model <model>`.
                 model_args: vec!["-m".to_string(), "{model}".to_string()],
+                default_model: None,
             },
         ),
     ]
@@ -425,6 +436,7 @@ mod tests {
                         args: vec!["-p".to_string(), "{prompt}".to_string()],
                         prompt_mode: PromptMode::Arg,
                         model_args: vec![],
+                        default_model: None,
                     },
                 );
                 m
@@ -439,6 +451,7 @@ mod tests {
                 args: vec![],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
+                default_model: None,
             },
         );
         new_harnesses.insert(
@@ -448,6 +461,7 @@ mod tests {
                 args: vec!["run".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
+                default_model: None,
             },
         );
 
@@ -481,6 +495,7 @@ mod tests {
                 args: vec![],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
+                default_model: None,
             },
         );
 
@@ -570,6 +585,7 @@ mod tests {
                 args: vec!["--custom".to_string()],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
+                default_model: None,
             },
         );
         config.clone_dir = "/my/custom/dir".to_string();
@@ -585,6 +601,7 @@ mod tests {
                 args: vec!["-p".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
+                default_model: None,
             },
         );
         new_harnesses.insert(
@@ -594,6 +611,7 @@ mod tests {
                 args: vec!["run".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
+                default_model: None,
             },
         );
 

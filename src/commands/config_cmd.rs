@@ -95,6 +95,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
                     args: Vec::new(),
                     prompt_mode: crate::config::PromptMode::Arg,
                     model_args: Vec::new(),
+                    default_model: None,
                 });
 
             match property {
@@ -111,9 +112,17 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
                                 )
                             })?;
                 }
+                "default_model" => {
+                    // Empty string clears the default model.
+                    harness.default_model = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
                 _ => {
                     bail!(
-                        "Unknown harness property '{}'. Valid: command, prompt_mode",
+                        "Unknown harness property '{}'. Valid: command, prompt_mode, default_model",
                         property
                     );
                 }

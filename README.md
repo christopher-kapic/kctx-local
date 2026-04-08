@@ -76,6 +76,32 @@ kcl config set default_harness claude-code
 kcl config show
 ```
 
+### Model selection
+
+Most coding harnesses support `--model` (or `-m`). kcl forwards a model identifier to the harness via each harness's `model_args` template (e.g. `["--model", "{model}"]` for claude, `["-m", "{model}"]` for opencode and codex). Per-invocation:
+
+```bash
+kcl ask hono "..." --model claude-sonnet-4-6
+```
+
+To pin a default model for a harness so you don't have to pass `--model` every time:
+
+```bash
+kcl config set harnesses.claude.default_model claude-sonnet-4-6
+kcl config set harnesses.opencode.default_model anthropic/claude-sonnet-4-20250514
+kcl config set harnesses.claude.default_model ""   # clear it
+```
+
+Resolution order is `--model` flag → harness `default_model` → none. If a harness has no `model_args` configured, both are silently ignored — so you can safely set a default model globally without worrying about which harness backs a given package.
+
+To see which harnesses are configured and their current defaults:
+
+```bash
+kcl harnesses list           # one harness per line, default marked
+kcl harnesses list -v        # verbose: command, prompt mode, model_args, default_model
+kcl harnesses list --json    # machine-readable
+```
+
 ## How It Works
 
 1. **Register** a codebase as a package (local path or git URL)

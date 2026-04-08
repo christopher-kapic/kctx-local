@@ -80,6 +80,12 @@ pub enum Command {
         command: ConfigCommand,
     },
 
+    /// Inspect configured harnesses
+    Harnesses {
+        #[command(subcommand)]
+        command: HarnessesCommand,
+    },
+
     /// Initialize kcl (creates config + db)
     Init {
         /// Skip prompts, use auto-detected defaults
@@ -216,4 +222,18 @@ pub enum ConfigCommand {
 
     /// Print config file path
     Path,
+}
+
+#[derive(Subcommand)]
+pub enum HarnessesCommand {
+    /// List configured harnesses
+    List {
+        /// Verbose output (command, prompt mode, model_args, default_model)
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
