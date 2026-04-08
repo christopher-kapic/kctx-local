@@ -34,6 +34,12 @@ pub enum Command {
         #[arg(long)]
         no_pull: bool,
 
+        /// Check out this branch before answering, then restore the
+        /// previously checked-out branch when finished. Pulls the branch
+        /// before running the harness regardless of --no-pull.
+        #[arg(long)]
+        branch: Option<String>,
+
         /// Include summaries of last N conversations in prompt
         #[arg(long, default_value = "0")]
         context: u32,
@@ -102,7 +108,7 @@ pub enum PackagesCommand {
         #[arg(long)]
         git: Option<String>,
 
-        /// Git branch (default: main)
+        /// Git branch to clone (default: the remote's default branch)
         #[arg(long)]
         branch: Option<String>,
     },

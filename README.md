@@ -43,11 +43,18 @@ cargo install --git https://github.com/christopher-kapic/kctx-local.git
 # Register a local codebase
 kcl packages add my-project --path /path/to/project
 
-# Register a git repo (kcl clones it for you)
+# Register a git repo (kcl clones it for you, using the remote's default branch)
 kcl packages add hono --git https://github.com/honojs/hono.git
+
+# Or pin to a specific branch
+kcl packages add hono --git https://github.com/honojs/hono.git --branch next
 
 # Ask a question
 kcl ask hono "How does the router middleware work?"
+
+# Ask against a different branch — kcl checks it out, pulls, answers, then
+# restores the original branch
+kcl ask hono "What changed in the router on the next branch?" --branch next
 
 # List registered packages
 kcl packages list

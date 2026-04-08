@@ -22,6 +22,7 @@ fn main() -> Result<()> {
             harness,
             timeout,
             no_pull,
+            branch,
             context,
         } => commands::ask::run(
             identifier,
@@ -29,6 +30,7 @@ fn main() -> Result<()> {
             harness.as_deref(),
             *timeout,
             *no_pull,
+            branch.as_deref(),
             *context,
         ),
 

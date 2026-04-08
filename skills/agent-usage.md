@@ -48,6 +48,10 @@ kcl ask hono "how does caching work?" --harness copilot
 # Skip auto-pull (faster, uses cached code)
 kcl ask hono "what middleware is available?" --no-pull
 
+# Ask against a different branch — kcl checks it out, pulls it, runs the
+# query, then restores whatever branch was checked out before
+kcl ask hono "what changed on the next branch?" --branch next
+
 # Include context from previous questions to avoid redundant exploration
 kcl ask hono "what about error handling?" --context 3
 
@@ -68,8 +72,11 @@ Check exit codes to decide whether to retry or adjust your question.
 If you need to query a codebase that isn't registered yet:
 
 ```bash
-# Register a git repo (kcl clones it automatically)
+# Register a git repo (kcl clones it automatically using the remote's default branch)
 kcl packages add <name> --git <url>
+
+# Pin to a specific branch at registration time
+kcl packages add <name> --git <url> --branch <branch>
 
 # Register a local directory
 kcl packages add <name> --path /absolute/path/to/code

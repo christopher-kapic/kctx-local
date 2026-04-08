@@ -74,6 +74,64 @@ pub fn is_git_repo(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
+/// Return the name of the currently checked-out branch in `repo_path`.
+///
+/// Shells out to `git -C <path> rev-parse --abbrev-ref HEAD`. If HEAD is
+/// detached this returns the literal string "HEAD" — callers that need to
+/// restore state should treat that as a special case.
+pub fn current_branch(repo_path: &Path) -> Result<String> {
+    check_git()?;
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .output()
+        .context("failed to execute git rev-parse")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git rev-parse failed: {}", stderr.trim());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Check out `branch` in the repository at `repo_path`.
+///
+/// Fetches from `origin` first so that branches that exist only on the
+/// remote can be checked out as new local tracking branches.
+pub fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
+    check_git()?;
+
+    // Fetch so we can resolve remote-only branches. Failures here are not
+    // fatal — the user may be offline and the branch may already be local.
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("fetch")
+        .arg("origin")
+        .arg(branch)
+        .output();
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("checkout")
+        .arg(branch)
+        .output()
+        .context("failed to execute git checkout")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git checkout {} failed: {}", branch, stderr.trim());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

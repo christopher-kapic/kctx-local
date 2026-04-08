@@ -93,17 +93,24 @@ fn cmd_add(
     {
         // Git package — may or may not have an explicit --path.
         if let Some(p) = path {
-            // Existing clone with remote tracking.
+            // Existing clone with remote tracking. If the user didn't specify
+            // a branch, record whatever branch the existing clone is on.
             let abs = resolve_and_validate_path(p)?;
+            let recorded_branch = match branch {
+                Some(b) => Some(b.to_string()),
+                None => git::current_branch(Path::new(&abs)).ok(),
+            };
             (
                 SourceType::Git,
                 Some(git_url.to_string()),
-                Some(branch.unwrap_or("main").to_string()),
+                recorded_branch,
                 abs,
                 true,
             )
         } else {
-            // Clone the repo to clone_dir/<identifier>.
+            // Clone the repo to clone_dir/<identifier>. When the user didn't
+            // pass --branch we let git pick the remote's default branch
+            // instead of hard-coding "main".
             let config = Config::load_or_default()?;
             let clone_dir = expand_tilde(&config.clone_dir);
             let pkg_dir = clone_dir.join(identifier);
@@ -115,15 +122,21 @@ fn cmd_add(
                 );
             }
 
-            let branch_str = branch.unwrap_or("main");
             eprintln!("cloning {} ...", git_url);
-            git::clone(git_url, &pkg_dir, Some(branch_str))?;
+            git::clone(git_url, &pkg_dir, branch)?;
             eprintln!("cloned to {}", pkg_dir.display());
+
+            // Record the actual branch we ended up on (either the explicit
+            // --branch value or the remote's default).
+            let recorded_branch = match branch {
+                Some(b) => Some(b.to_string()),
+                None => git::current_branch(&pkg_dir).ok(),
+            };
 
             (
                 SourceType::Git,
                 Some(git_url.to_string()),
-                Some(branch_str.to_string()),
+                recorded_branch,
                 pkg_dir.to_string_lossy().to_string(),
                 true,
             )

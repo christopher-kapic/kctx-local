@@ -32,6 +32,7 @@ pub fn run(
     harness_override: Option<&str>,
     timeout_override: Option<u64>,
     no_pull: bool,
+    branch_override: Option<&str>,
     context: u32,
 ) -> Result<()> {
     // 1. Open DB and look up package.
@@ -68,9 +69,47 @@ pub fn run(
 
     let timeout = timeout_override.unwrap_or(config.default_timeout);
 
-    // 3. Auto-pull if applicable.
-    if !no_pull && pkg.auto_pull && pkg.source_type == SourceType::Git {
-        let repo_path = Path::new(&pkg.path);
+    // 3a. If --branch was supplied, check it out (saving the current branch
+    //     so we can restore it after the harness runs). Branch overrides are
+    //     only meaningful for git packages.
+    let repo_path = Path::new(&pkg.path);
+    let original_branch: Option<String> = if let Some(target_branch) = branch_override {
+        if pkg.source_type != SourceType::Git {
+            anyhow::bail!(
+                "--branch is only valid for git packages; '{}' is a local package",
+                pkg.identifier
+            );
+        }
+
+        let current = git::current_branch(repo_path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to determine current branch for {}: {}",
+                pkg.identifier,
+                e
+            )
+        })?;
+
+        if current != target_branch {
+            eprintln!("checking out {} (was on {}) ...", target_branch, current);
+            git::checkout(repo_path, target_branch)?;
+            Some(current)
+        } else {
+            // Already on the requested branch — nothing to restore.
+            None
+        }
+    } else {
+        None
+    };
+
+    // 3b. Auto-pull if applicable. We always pull when --branch is supplied
+    //     (so the user gets the latest of that branch), regardless of
+    //     --no-pull or the package's auto_pull setting.
+    let should_pull = if branch_override.is_some() {
+        true
+    } else {
+        !no_pull && pkg.auto_pull && pkg.source_type == SourceType::Git
+    };
+    if should_pull && pkg.source_type == SourceType::Git {
         eprintln!("pulling {} ...", pkg.identifier);
         match git::pull(repo_path) {
             Ok(msg) => eprintln!("{}: {}", pkg.identifier, msg),
@@ -109,11 +148,13 @@ pub fn run(
 
     let finished_at = Utc::now();
 
-    // Handle harness execution result.
+    // Handle harness execution result. Make sure we always restore the
+    // original branch (if we changed it) before propagating an error.
     let output = match harness_result {
         Ok(output) => output,
         Err(e) => {
             eprintln!("error: {}", e);
+            restore_branch(repo_path, original_branch.as_deref());
             std::process::exit(2);
         }
     };
@@ -157,13 +198,31 @@ pub fn run(
     };
     conversation.insert(&conn)?;
 
-    // 8. Exit with harness exit code.
+    // 8. Restore the original branch (if we changed it) and exit with the
+    //    harness exit code.
+    restore_branch(repo_path, original_branch.as_deref());
+
     let exit_code = output.exit_code.unwrap_or(1);
     if exit_code != 0 {
         std::process::exit(2);
     }
 
     Ok(())
+}
+
+/// Try to restore `repo_path` to the previously checked-out branch.
+///
+/// Failures are logged to stderr but never propagated — the harness has
+/// already produced its result and the user shouldn't see a successful
+/// answer turn into a failed exit code just because git was unhappy.
+fn restore_branch(repo_path: &Path, original_branch: Option<&str>) {
+    let Some(branch) = original_branch else {
+        return;
+    };
+    eprintln!("restoring branch {} ...", branch);
+    if let Err(e) = git::checkout(repo_path, branch) {
+        eprintln!("warning: failed to restore branch {}: {}", branch, e);
+    }
 }
 
 #[cfg(test)]
