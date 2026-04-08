@@ -20,6 +20,8 @@ struct ConversationLog {
     package_identifier: String,
     question: String,
     harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     started_at: String,
     finished_at: String,
     exit_code: Option<i32>,
@@ -30,6 +32,7 @@ pub fn run(
     identifier: &str,
     question: &str,
     harness_override: Option<&str>,
+    model: Option<&str>,
     timeout_override: Option<u64>,
     no_pull: bool,
     branch_override: Option<&str>,
@@ -144,6 +147,7 @@ pub fn run(
         &cwd,
         timeout,
         true, // stream stdout to caller
+        model,
     ));
 
     let finished_at = Utc::now();
@@ -170,12 +174,19 @@ pub fn run(
     let pkg_log_dir = log_dir.join(&pkg.identifier);
     std::fs::create_dir_all(&pkg_log_dir)?;
 
+    // Only record the model in the log if the harness actually accepted it.
+    // (model_args being non-empty is the signal that --model was forwarded.)
+    let logged_model = model
+        .filter(|_| !harness_config.model_args.is_empty())
+        .map(|s| s.to_string());
+
     let log = ConversationLog {
         id: conv_id.clone(),
         package_id: pkg.id.clone(),
         package_identifier: pkg.identifier.clone(),
         question: question.to_string(),
         harness: harness_name.clone(),
+        model: logged_model,
         started_at: started_at.to_rfc3339(),
         finished_at: finished_at.to_rfc3339(),
         exit_code: output.exit_code,
@@ -246,6 +257,7 @@ mod tests {
             package_identifier: "axum".to_string(),
             question: "How does routing work?".to_string(),
             harness: "claude".to_string(),
+            model: Some("claude-sonnet-4.6".to_string()),
             started_at: "2026-04-07T10:30:00+00:00".to_string(),
             finished_at: "2026-04-07T10:30:45+00:00".to_string(),
             exit_code: Some(0),
@@ -259,6 +271,7 @@ mod tests {
         assert_eq!(parsed["package_identifier"], "axum");
         assert_eq!(parsed["question"], "How does routing work?");
         assert_eq!(parsed["harness"], "claude");
+        assert_eq!(parsed["model"], "claude-sonnet-4.6");
         assert_eq!(parsed["exit_code"], 0);
         assert_eq!(parsed["response"], "Routing in axum uses...");
     }
@@ -271,6 +284,7 @@ mod tests {
             package_identifier: "test".to_string(),
             question: "test?".to_string(),
             harness: "claude".to_string(),
+            model: None,
             started_at: "2026-04-07T10:30:00+00:00".to_string(),
             finished_at: "2026-04-07T10:30:45+00:00".to_string(),
             exit_code: None,
@@ -280,6 +294,8 @@ mod tests {
         let json = serde_json::to_string_pretty(&log).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed["exit_code"].is_null());
+        // model is omitted from the serialized JSON when None
+        assert!(parsed.get("model").is_none());
     }
 
     #[test]

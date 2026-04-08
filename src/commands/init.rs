@@ -24,6 +24,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                     "--bare".to_string(),
                 ],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec!["--model".to_string(), "{model}".to_string()],
             },
         ),
         (
@@ -37,6 +38,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                     "{prompt}".to_string(),
                 ],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec!["--model".to_string(), "{model}".to_string()],
             },
         ),
         (
@@ -50,6 +52,9 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                     "--allow-all-paths".to_string(),
                 ],
                 prompt_mode: PromptMode::Arg,
+                // copilot uses `=`-style: `--model=<name>` (e.g.
+                // `--model=claude-sonnet-4.6` or `--model=gpt-5.2`).
+                model_args: vec!["--model={model}".to_string()],
             },
         ),
         (
@@ -58,6 +63,9 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 command: "pi".to_string(),
                 args: vec!["-p".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
+                // Pi accepts `--model <pattern>` (e.g. `gpt-4o-mini`,
+                // `openai/gpt-4o`, `sonnet:high`).
+                model_args: vec!["--model".to_string(), "{model}".to_string()],
             },
         ),
         (
@@ -66,6 +74,10 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 command: "opencode".to_string(),
                 args: vec!["run".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
+                // opencode expects `-m provider/model` — the user supplies
+                // the full provider/model string as the --model value
+                // (e.g. `anthropic/claude-sonnet-4-20250514`).
+                model_args: vec!["-m".to_string(), "{model}".to_string()],
             },
         ),
         (
@@ -74,6 +86,11 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 command: "codex".to_string(),
                 args: vec!["-p".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
+                // Codex accepts `-m <model>` / `--model <model>`.
+                // Note: codex's actual non-interactive invocation is
+                // `codex exec ...`, not `codex -p ...` — the default `args`
+                // above mirrors the original plan and may need a follow-up.
+                model_args: vec!["-m".to_string(), "{model}".to_string()],
             },
         ),
     ]
@@ -407,6 +424,7 @@ mod tests {
                         command: "claude".to_string(),
                         args: vec!["-p".to_string(), "{prompt}".to_string()],
                         prompt_mode: PromptMode::Arg,
+                        model_args: vec![],
                     },
                 );
                 m
@@ -420,6 +438,7 @@ mod tests {
                 command: "claude-new".to_string(),
                 args: vec![],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec![],
             },
         );
         new_harnesses.insert(
@@ -428,6 +447,7 @@ mod tests {
                 command: "opencode".to_string(),
                 args: vec!["run".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec![],
             },
         );
 
@@ -460,6 +480,7 @@ mod tests {
                 command: "opencode".to_string(),
                 args: vec![],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec![],
             },
         );
 
@@ -548,6 +569,7 @@ mod tests {
                 command: "my-custom-claude".to_string(),
                 args: vec!["--custom".to_string()],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec![],
             },
         );
         config.clone_dir = "/my/custom/dir".to_string();
@@ -562,6 +584,7 @@ mod tests {
                 command: "claude".to_string(),
                 args: vec!["-p".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec![],
             },
         );
         new_harnesses.insert(
@@ -570,6 +593,7 @@ mod tests {
                 command: "opencode".to_string(),
                 args: vec!["run".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec![],
             },
         );
 

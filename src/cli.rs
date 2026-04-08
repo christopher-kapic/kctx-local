@@ -26,6 +26,12 @@ pub enum Command {
         #[arg(long)]
         harness: Option<String>,
 
+        /// Model to forward to the harness (e.g. claude-sonnet-4.6).
+        /// Silently ignored if the selected harness has no model_args
+        /// configured.
+        #[arg(long)]
+        model: Option<String>,
+
         /// Override timeout in seconds
         #[arg(long)]
         timeout: Option<u64>,

@@ -35,6 +35,19 @@ pub struct HarnessConfig {
     /// How the prompt is delivered: "arg" (replace {prompt} in args) or "stdin".
     #[serde(default = "default_prompt_mode")]
     pub prompt_mode: PromptMode,
+
+    /// Optional template for forwarding `--model` to the harness. When the
+    /// user supplies `--model X` to `kcl ask`, these args are appended to the
+    /// harness invocation with `{model}` replaced by `X`. If empty, the
+    /// harness does not support model selection and `--model` is silently
+    /// ignored for it.
+    ///
+    /// Examples:
+    /// - `["--model", "{model}"]` — flag + value as separate args
+    /// - `["--model={model}"]` — single combined arg
+    /// - `["-m", "{model}"]` — short flag
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -203,6 +216,7 @@ mod tests {
                 command: "test-agent".to_string(),
                 args: vec!["-p".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec![],
             },
         );
 
@@ -223,6 +237,7 @@ mod tests {
                 command: "claude".to_string(),
                 args: vec!["-p".to_string(), "{prompt}".to_string()],
                 prompt_mode: PromptMode::Arg,
+                model_args: vec![],
             },
         );
 

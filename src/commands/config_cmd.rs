@@ -94,6 +94,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
                     command: String::new(),
                     args: Vec::new(),
                     prompt_mode: crate::config::PromptMode::Arg,
+                    model_args: Vec::new(),
                 });
 
             match property {

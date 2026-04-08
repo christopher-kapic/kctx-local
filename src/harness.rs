@@ -67,16 +67,30 @@ pub fn build_prompt(
 }
 
 /// Build the argument list for the harness, replacing `{prompt}` placeholders
-/// when using `prompt_mode: arg`.
-pub fn build_args(harness: &HarnessConfig, prompt: &str) -> Vec<String> {
-    match harness.prompt_mode {
+/// when using `prompt_mode: arg` and appending `model_args` (with `{model}`
+/// replaced) when a model was requested and the harness supports it.
+///
+/// If `model` is `Some` but `harness.model_args` is empty, the model is
+/// silently ignored — the harness simply doesn't support model selection.
+pub fn build_args(harness: &HarnessConfig, prompt: &str, model: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = match harness.prompt_mode {
         PromptMode::Arg => harness
             .args
             .iter()
             .map(|arg| arg.replace("{prompt}", prompt))
             .collect(),
         PromptMode::Stdin => harness.args.clone(),
+    };
+
+    if let Some(model) = model
+        && !harness.model_args.is_empty()
+    {
+        for arg in &harness.model_args {
+            args.push(arg.replace("{model}", model));
+        }
     }
+
+    args
 }
 
 /// Spawn a harness subprocess, stream its output in real-time, and return
@@ -85,14 +99,17 @@ pub fn build_args(harness: &HarnessConfig, prompt: &str) -> Vec<String> {
 /// - `cwd`: the package path (working directory for the subprocess)
 /// - `timeout_secs`: kill the subprocess after this many seconds
 /// - `stream_stdout`: if true, stream stdout lines to the caller's stdout in real-time
+/// - `model`: optional model identifier to forward via the harness's
+///   `model_args` template. Silently ignored if the harness has no template.
 pub async fn run_harness(
     harness: &HarnessConfig,
     prompt: &str,
     cwd: &Path,
     timeout_secs: u64,
     stream_stdout: bool,
+    model: Option<&str>,
 ) -> Result<HarnessOutput> {
-    let args = build_args(harness, prompt);
+    let args = build_args(harness, prompt, model);
 
     let stdin_cfg = match harness.prompt_mode {
         PromptMode::Stdin => Stdio::piped(),
@@ -257,9 +274,10 @@ mod tests {
                 "--bare".to_string(),
             ],
             prompt_mode: PromptMode::Arg,
+            model_args: vec![],
         };
 
-        let args = build_args(&harness, "test prompt");
+        let args = build_args(&harness, "test prompt", None);
         assert_eq!(args, vec!["-p", "test prompt", "--bare"]);
     }
 
@@ -272,9 +290,10 @@ mod tests {
                 "--title={prompt}".to_string(),
             ],
             prompt_mode: PromptMode::Arg,
+            model_args: vec![],
         };
 
-        let args = build_args(&harness, "my question");
+        let args = build_args(&harness, "my question", None);
         assert_eq!(args, vec!["--query=my question", "--title=my question"]);
     }
 
@@ -284,12 +303,68 @@ mod tests {
             command: "my-agent".to_string(),
             args: vec!["--query".to_string()],
             prompt_mode: PromptMode::Stdin,
+            model_args: vec![],
         };
 
-        let args = build_args(&harness, "test prompt");
+        let args = build_args(&harness, "test prompt", None);
         assert_eq!(args, vec!["--query"]);
         // {prompt} should NOT appear in args for stdin mode
         assert!(!args.iter().any(|a| a.contains("{prompt}")));
+    }
+
+    #[test]
+    fn build_args_appends_model_when_supported() {
+        let harness = HarnessConfig {
+            command: "claude".to_string(),
+            args: vec!["-p".to_string(), "{prompt}".to_string()],
+            prompt_mode: PromptMode::Arg,
+            model_args: vec!["--model".to_string(), "{model}".to_string()],
+        };
+
+        let args = build_args(&harness, "the question", Some("claude-sonnet-4.6"));
+        assert_eq!(
+            args,
+            vec!["-p", "the question", "--model", "claude-sonnet-4.6"]
+        );
+    }
+
+    #[test]
+    fn build_args_silently_ignores_model_when_unsupported() {
+        let harness = HarnessConfig {
+            command: "pi".to_string(),
+            args: vec!["-p".to_string(), "{prompt}".to_string()],
+            prompt_mode: PromptMode::Arg,
+            model_args: vec![], // empty: harness has no model flag
+        };
+
+        let args = build_args(&harness, "q", Some("some-model"));
+        assert_eq!(args, vec!["-p", "q"]);
+    }
+
+    #[test]
+    fn build_args_does_not_inject_model_args_when_none_requested() {
+        let harness = HarnessConfig {
+            command: "claude".to_string(),
+            args: vec!["-p".to_string(), "{prompt}".to_string()],
+            prompt_mode: PromptMode::Arg,
+            model_args: vec!["--model".to_string(), "{model}".to_string()],
+        };
+
+        let args = build_args(&harness, "q", None);
+        assert_eq!(args, vec!["-p", "q"]);
+    }
+
+    #[test]
+    fn build_args_model_combined_arg_format() {
+        let harness = HarnessConfig {
+            command: "agent".to_string(),
+            args: vec!["{prompt}".to_string()],
+            prompt_mode: PromptMode::Arg,
+            model_args: vec!["--model={model}".to_string()],
+        };
+
+        let args = build_args(&harness, "q", Some("gpt-4"));
+        assert_eq!(args, vec!["q", "--model=gpt-4"]);
     }
 
     #[tokio::test]
@@ -298,10 +373,13 @@ mod tests {
             command: "echo".to_string(),
             args: vec!["hello from harness".to_string()],
             prompt_mode: PromptMode::Arg,
+            model_args: vec![],
         };
 
         let cwd = std::env::temp_dir();
-        let result = run_harness(&harness, "", &cwd, 10, false).await.unwrap();
+        let result = run_harness(&harness, "", &cwd, 10, false, None)
+            .await
+            .unwrap();
 
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout.trim(), "hello from harness");
@@ -313,10 +391,13 @@ mod tests {
             command: "sh".to_string(),
             args: vec!["-c".to_string(), "exit 42".to_string()],
             prompt_mode: PromptMode::Arg,
+            model_args: vec![],
         };
 
         let cwd = std::env::temp_dir();
-        let result = run_harness(&harness, "", &cwd, 10, false).await.unwrap();
+        let result = run_harness(&harness, "", &cwd, 10, false, None)
+            .await
+            .unwrap();
 
         assert_eq!(result.exit_code, Some(42));
     }
@@ -327,10 +408,13 @@ mod tests {
             command: "sh".to_string(),
             args: vec!["-c".to_string(), "echo out; echo err >&2".to_string()],
             prompt_mode: PromptMode::Arg,
+            model_args: vec![],
         };
 
         let cwd = std::env::temp_dir();
-        let result = run_harness(&harness, "", &cwd, 10, false).await.unwrap();
+        let result = run_harness(&harness, "", &cwd, 10, false, None)
+            .await
+            .unwrap();
 
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout.trim(), "out");
@@ -343,10 +427,11 @@ mod tests {
             command: "cat".to_string(),
             args: vec![],
             prompt_mode: PromptMode::Stdin,
+            model_args: vec![],
         };
 
         let cwd = std::env::temp_dir();
-        let result = run_harness(&harness, "hello via stdin", &cwd, 10, false)
+        let result = run_harness(&harness, "hello via stdin", &cwd, 10, false, None)
             .await
             .unwrap();
 
@@ -360,10 +445,11 @@ mod tests {
             command: "echo".to_string(),
             args: vec!["{prompt}".to_string()],
             prompt_mode: PromptMode::Arg,
+            model_args: vec![],
         };
 
         let cwd = std::env::temp_dir();
-        let result = run_harness(&harness, "the prompt text", &cwd, 10, false)
+        let result = run_harness(&harness, "the prompt text", &cwd, 10, false, None)
             .await
             .unwrap();
 
@@ -377,10 +463,11 @@ mod tests {
             command: "sleep".to_string(),
             args: vec!["60".to_string()],
             prompt_mode: PromptMode::Arg,
+            model_args: vec![],
         };
 
         let cwd = std::env::temp_dir();
-        let result = run_harness(&harness, "", &cwd, 1, false).await;
+        let result = run_harness(&harness, "", &cwd, 1, false, None).await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
