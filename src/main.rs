@@ -25,16 +25,16 @@ fn main() -> Result<()> {
             no_pull,
             branch,
             context,
-        } => commands::ask::run(
+        } => commands::ask::run(commands::ask::AskArgs {
             identifier,
             question,
-            harness.as_deref(),
-            model.as_deref(),
-            *timeout,
-            *no_pull,
-            branch.as_deref(),
-            *context,
-        ),
+            harness_override: harness.as_deref(),
+            model: model.as_deref(),
+            timeout_override: *timeout,
+            no_pull: *no_pull,
+            branch_override: branch.as_deref(),
+            context: *context,
+        }),
 
         Command::List { verbose, json } => {
             // Alias for packages list

@@ -28,16 +28,33 @@ struct ConversationLog {
     response: String,
 }
 
-pub fn run(
-    identifier: &str,
-    question: &str,
-    harness_override: Option<&str>,
-    model: Option<&str>,
-    timeout_override: Option<u64>,
-    no_pull: bool,
-    branch_override: Option<&str>,
-    context: u32,
-) -> Result<()> {
+/// Arguments for a single `kcl ask` invocation.
+///
+/// Grouped into a struct so the call site (main.rs) and `run` itself stay
+/// readable as the set of knobs grows.
+pub struct AskArgs<'a> {
+    pub identifier: &'a str,
+    pub question: &'a str,
+    pub harness_override: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub timeout_override: Option<u64>,
+    pub no_pull: bool,
+    pub branch_override: Option<&'a str>,
+    pub context: u32,
+}
+
+pub fn run(args: AskArgs<'_>) -> Result<()> {
+    let AskArgs {
+        identifier,
+        question,
+        harness_override,
+        model,
+        timeout_override,
+        no_pull,
+        branch_override,
+        context,
+    } = args;
+
     // 1. Open DB and look up package.
     let db_path = dirs::db_file()?;
     let conn = db::open(&db_path)?;
