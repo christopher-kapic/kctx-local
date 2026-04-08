@@ -51,7 +51,7 @@ src/
 
 ## Querying Dependencies with kctx
 
-This project's coding agents have access to **kctx** — a dependency knowledge service. Use the `mcp__kctx__query_dependency` and `mcp__kctx__list_dependencies` MCP tools to ask usage questions about external libraries.
+This project's coding agents have access to **kctx** — a dependency knowledge service exposed as an MCP server. Use its `query_dependency` and `list_dependencies` tools to ask usage questions about external libraries. (Tool names may be prefixed by your harness — e.g. `mcp__kctx__query_dependency` in some harnesses, `kctx.query_dependency` in others.)
 
 Relevant dependencies available via kctx:
 - `claude-code` — Claude Code CLI (harness reference)
@@ -62,7 +62,7 @@ Relevant dependencies available via kctx:
 
 ## Solved Problems
 
-The following solved problems (via `mcp__sp__get_solved_problems`) are relevant:
+If your harness has access to a Solved Problems MCP service, the following entries are relevant:
 - `rust-cli-github-releases-install-script-distribution` — GitHub Releases + install script for Rust CLI distribution. Use this when setting up CI/CD and distribution.
 
 ## Build & Test
