@@ -5,32 +5,53 @@ use anyhow::{Context, Result};
 const APP_NAME: &str = "kcl";
 
 /// Returns the config directory for kcl.
-/// Linux: ~/.config/kcl
-/// macOS: ~/Library/Application Support/kcl
-/// Windows: %APPDATA%\kcl
+///
+/// kcl uses XDG-style config paths on every platform (not the native macOS
+/// `~/Library/Application Support` location), so the config lives at:
+/// - `$XDG_CONFIG_HOME/kcl` if `XDG_CONFIG_HOME` is set
+/// - `~/.config/kcl` otherwise
 pub fn config_dir() -> Result<PathBuf> {
-    let base = dirs::config_dir().context("could not determine config directory")?;
+    let base = xdg_dir_or_home_relative("XDG_CONFIG_HOME", &[".config"])?;
     Ok(base.join(APP_NAME))
 }
 
 /// Returns the data directory for kcl (SQLite database).
-/// Linux: ~/.local/share/kcl
-/// macOS: ~/Library/Application Support/kcl
-/// Windows: %LOCALAPPDATA%\kcl
+///
+/// kcl uses XDG-style data paths on every platform (not the native macOS
+/// `~/Library/Application Support` location), so the database lives at:
+/// - `$XDG_DATA_HOME/kcl` if `XDG_DATA_HOME` is set
+/// - `~/.local/share/kcl` otherwise
 pub fn data_dir() -> Result<PathBuf> {
-    let base = dirs::data_dir().context("could not determine data directory")?;
+    let base = xdg_dir_or_home_relative("XDG_DATA_HOME", &[".local", "share"])?;
     Ok(base.join(APP_NAME))
 }
 
 /// Returns the state directory for kcl (conversation logs).
-/// Linux: ~/.local/state/kcl
-/// macOS: ~/Library/Application Support/kcl (falls back to data_dir)
-/// Windows: %LOCALAPPDATA%\kcl (falls back to data_dir)
+///
+/// kcl uses XDG-style state paths on every platform (not the native macOS
+/// `~/Library/Application Support` location), so logs live under:
+/// - `$XDG_STATE_HOME/kcl` if `XDG_STATE_HOME` is set
+/// - `~/.local/state/kcl` otherwise
 pub fn state_dir() -> Result<PathBuf> {
-    let base = dirs::state_dir()
-        .or_else(dirs::data_dir)
-        .context("could not determine state directory")?;
+    let base = xdg_dir_or_home_relative("XDG_STATE_HOME", &[".local", "state"])?;
     Ok(base.join(APP_NAME))
+}
+
+/// Resolves an XDG base directory: returns `$VAR` if set to an absolute path,
+/// otherwise `$HOME` joined with the given fallback components.
+fn xdg_dir_or_home_relative(var: &str, fallback: &[&str]) -> Result<PathBuf> {
+    if let Some(val) = std::env::var_os(var) {
+        let path = PathBuf::from(val);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+        // Per the XDG spec, a non-absolute value is invalid; fall through.
+    }
+    let mut home = dirs::home_dir().context("could not determine home directory")?;
+    for component in fallback {
+        home.push(component);
+    }
+    Ok(home)
 }
 
 /// Returns the log directory for conversation logs.
