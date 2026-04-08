@@ -38,13 +38,12 @@ pub fn run(
     let db_path = dirs::db_file()?;
     let conn = db::open(&db_path)?;
 
-    let pkg = Package::get_by_identifier(&conn, identifier)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Package '{}' not found. Run `kcl list` to see available packages.",
-                identifier
-            )
-        })?;
+    let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Package '{}' not found. Run `kcl list` to see available packages.",
+            identifier
+        )
+    })?;
 
     // 2. Load config to resolve harness.
     let config = Config::load_or_default()?;

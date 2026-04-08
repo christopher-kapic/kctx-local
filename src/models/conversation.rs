@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -76,15 +76,17 @@ impl Conversation {
     }
 
     /// Return the question text of the N most recent conversations for a package.
-    pub fn recent_questions(conn: &Connection, package_id: &str, limit: u32) -> Result<Vec<String>> {
+    pub fn recent_questions(
+        conn: &Connection,
+        package_id: &str,
+        limit: u32,
+    ) -> Result<Vec<String>> {
         let mut stmt = conn.prepare(
             "SELECT question FROM conversations WHERE package_id = ?1
              ORDER BY created_at DESC LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![package_id, limit], |row| {
-            row.get::<_, String>(0)
-        })?;
+        let rows = stmt.query_map(params![package_id, limit], |row| row.get::<_, String>(0))?;
 
         let mut questions = Vec::new();
         for row in rows {
@@ -121,10 +123,7 @@ impl Conversation {
                  FROM conversations WHERE package_id = ?1
                  ORDER BY created_at DESC LIMIT ?2"
                     .to_string(),
-                vec![
-                    Box::new(package_id.to_string()),
-                    Box::new(limit),
-                ],
+                vec![Box::new(package_id.to_string()), Box::new(limit)],
             ),
         };
 

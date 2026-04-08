@@ -45,19 +45,20 @@ fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Res
     let db_path = dirs::db_file()?;
     let conn = db::open(&db_path)?;
 
-    let pkg = Package::get_by_identifier(&conn, identifier)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Package '{}' not found. Run `kcl list` to see available packages.",
-                identifier
-            )
-        })?;
+    let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Package '{}' not found. Run `kcl list` to see available packages.",
+            identifier
+        )
+    })?;
 
     let conversations = Conversation::list_filtered(&conn, &pkg.id, limit, since)?;
 
     if json {
-        let summaries: Vec<ConversationSummary> =
-            conversations.iter().map(ConversationSummary::from).collect();
+        let summaries: Vec<ConversationSummary> = conversations
+            .iter()
+            .map(ConversationSummary::from)
+            .collect();
         let output = serde_json::to_string_pretty(&summaries)?;
         println!("{}", output);
     } else {

@@ -91,14 +91,13 @@ fn detect_harnesses() -> Vec<String> {
 
 /// Select the default harness based on what was detected.
 /// Returns (selected_name, was_user_prompted).
-fn select_default_harness(
-    detected: &[String],
-    non_interactive: bool,
-) -> Result<String> {
+fn select_default_harness(detected: &[String], non_interactive: bool) -> Result<String> {
     match detected.len() {
         0 => {
             eprintln!("Warning: no known harnesses found in PATH. Defaulting to 'claude'.");
-            eprintln!("Install a supported harness or configure one manually with 'kcl config set'.");
+            eprintln!(
+                "Install a supported harness or configure one manually with 'kcl config set'."
+            );
             Ok("claude".to_string())
         }
         1 => {
@@ -138,10 +137,7 @@ fn select_default_harness(
                         .context("invalid selection")?
                         .checked_sub(1)
                         .context("selection out of range")?;
-                    detected
-                        .get(idx)
-                        .cloned()
-                        .context("selection out of range")
+                    detected.get(idx).cloned().context("selection out of range")
                 }
             }
         }
@@ -195,7 +191,12 @@ fn build_harness_map(detected: &[String]) -> HashMap<String, HarnessConfig> {
 }
 
 /// Merge new harness entries into an existing config without overwriting.
-fn merge_config(existing: &mut Config, new_harnesses: HashMap<String, HarnessConfig>, clone_dir: &str, default_harness: &str) {
+fn merge_config(
+    existing: &mut Config,
+    new_harnesses: HashMap<String, HarnessConfig>,
+    clone_dir: &str,
+    default_harness: &str,
+) {
     // Only update clone_dir if it's still the default (hasn't been customized)
     if existing.clone_dir == "~/src/kcl-packages" {
         existing.clone_dir = clone_dir.to_string();
@@ -214,8 +215,12 @@ fn merge_config(existing: &mut Config, new_harnesses: HashMap<String, HarnessCon
 
 /// Generate shell completion files for bash, zsh, and fish.
 fn generate_completions(completions_dir: &PathBuf) -> Result<()> {
-    std::fs::create_dir_all(completions_dir)
-        .with_context(|| format!("creating completions directory: {}", completions_dir.display()))?;
+    std::fs::create_dir_all(completions_dir).with_context(|| {
+        format!(
+            "creating completions directory: {}",
+            completions_dir.display()
+        )
+    })?;
 
     let shells = [
         (Shell::Bash, "kcl.bash"),
@@ -225,8 +230,8 @@ fn generate_completions(completions_dir: &PathBuf) -> Result<()> {
 
     for (shell, filename) in &shells {
         let path = completions_dir.join(filename);
-        let mut file = std::fs::File::create(&path)
-            .with_context(|| format!("creating {}", path.display()))?;
+        let mut file =
+            std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
         let mut cmd = Cli::command();
         generate(*shell, &mut cmd, "kcl", &mut file);
     }
@@ -458,7 +463,12 @@ mod tests {
             },
         );
 
-        merge_config(&mut existing, new_harnesses, "~/src/kcl-packages", "opencode");
+        merge_config(
+            &mut existing,
+            new_harnesses,
+            "~/src/kcl-packages",
+            "opencode",
+        );
 
         assert_eq!(existing.default_harness, "opencode");
     }

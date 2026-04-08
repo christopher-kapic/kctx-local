@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
@@ -275,10 +275,7 @@ mod tests {
         };
 
         let args = build_args(&harness, "my question");
-        assert_eq!(
-            args,
-            vec!["--query=my question", "--title=my question"]
-        );
+        assert_eq!(args, vec!["--query=my question", "--title=my question"]);
     }
 
     #[test]
@@ -328,10 +325,7 @@ mod tests {
     async fn run_harness_captures_stderr() {
         let harness = HarnessConfig {
             command: "sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "echo out; echo err >&2".to_string(),
-            ],
+            args: vec!["-c".to_string(), "echo out; echo err >&2".to_string()],
             prompt_mode: PromptMode::Arg,
         };
 
@@ -389,11 +383,6 @@ mod tests {
         let result = run_harness(&harness, "", &cwd, 1, false).await;
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("timed out")
-        );
+        assert!(result.unwrap_err().to_string().contains("timed out"));
     }
 }

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// Check that the `git` binary is available on PATH.
 fn check_git() -> Result<()> {
@@ -146,10 +146,7 @@ mod tests {
     fn pull_fails_on_nonexistent_path() {
         let result = pull(&PathBuf::from("/nonexistent/path/kcl-test-12345"));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("does not exist"));
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::cli::ConfigCommand;
 use crate::config::Config;
@@ -101,15 +101,14 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
                     harness.command = value.to_string();
                 }
                 "prompt_mode" => {
-                    harness.prompt_mode = serde_json::from_value(
-                        serde_json::Value::String(value.to_string()),
-                    )
-                    .with_context(|| {
-                        format!(
-                            "invalid prompt_mode '{}': expected 'arg' or 'stdin'",
-                            value
-                        )
-                    })?;
+                    harness.prompt_mode =
+                        serde_json::from_value(serde_json::Value::String(value.to_string()))
+                            .with_context(|| {
+                                format!(
+                                    "invalid prompt_mode '{}': expected 'arg' or 'stdin'",
+                                    value
+                                )
+                            })?;
                 }
                 _ => {
                     bail!(
@@ -148,11 +147,7 @@ mod tests {
 
     fn setup_test_config() -> (std::path::PathBuf, impl Drop) {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = env::temp_dir().join(format!(
-            "kcl-config-test-{}-{}",
-            std::process::id(),
-            id
-        ));
+        let dir = env::temp_dir().join(format!("kcl-config-test-{}-{}", std::process::id(), id));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

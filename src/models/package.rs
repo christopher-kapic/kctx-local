@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -133,9 +133,7 @@ impl Package {
              FROM packages ORDER BY identifier",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok(Self::from_row_inner(row))
-        })?;
+        let rows = stmt.query_map([], |row| Ok(Self::from_row_inner(row)))?;
 
         let mut packages = Vec::new();
         for row in rows {

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::cli::PackagesCommand;
 use crate::config::Config;
@@ -23,7 +23,12 @@ pub fn run(command: &PackagesCommand) -> Result<()> {
             path,
             git,
             branch,
-        } => cmd_add(identifier, path.as_deref(), git.as_deref(), branch.as_deref()),
+        } => cmd_add(
+            identifier,
+            path.as_deref(),
+            git.as_deref(),
+            branch.as_deref(),
+        ),
         PackagesCommand::Remove { identifier } => cmd_remove(identifier),
         PackagesCommand::Show { identifier, json } => cmd_show(identifier, *json),
         PackagesCommand::Pull { identifier, all } => cmd_pull(identifier.as_deref(), *all),
@@ -69,61 +74,66 @@ fn cmd_add(
 ) -> Result<()> {
     // Validate: must supply --path or --git (or both for tracking existing clone with remote).
     if path.is_none() && git.is_none() {
-        bail!("Must specify --path or --git (or both). Examples:\n  kcl packages add {identifier} --path /path/to/codebase\n  kcl packages add {identifier} --git https://github.com/user/repo.git");
+        bail!(
+            "Must specify --path or --git (or both). Examples:\n  kcl packages add {identifier} --path /path/to/codebase\n  kcl packages add {identifier} --git https://github.com/user/repo.git"
+        );
     }
 
     let conn = open_db()?;
 
     // Check for duplicate identifier.
     if Package::get_by_identifier(&conn, identifier)?.is_some() {
-        bail!("Package '{identifier}' already exists. Use `kcl packages show {identifier}` to view it or choose a different identifier.");
+        bail!(
+            "Package '{identifier}' already exists. Use `kcl packages show {identifier}` to view it or choose a different identifier."
+        );
     }
 
-    let (source_type, source_url, source_branch, resolved_path, auto_pull) =
-        if let Some(git_url) = git {
-            // Git package — may or may not have an explicit --path.
-            if let Some(p) = path {
-                // Existing clone with remote tracking.
-                let abs = resolve_and_validate_path(p)?;
-                (
-                    SourceType::Git,
-                    Some(git_url.to_string()),
-                    Some(branch.unwrap_or("main").to_string()),
-                    abs,
-                    true,
-                )
-            } else {
-                // Clone the repo to clone_dir/<identifier>.
-                let config = Config::load_or_default()?;
-                let clone_dir = expand_tilde(&config.clone_dir);
-                let pkg_dir = clone_dir.join(identifier);
-
-                if pkg_dir.exists() {
-                    bail!(
-                        "clone target already exists: {}; remove it first or use --path to track it",
-                        pkg_dir.display()
-                    );
-                }
-
-                let branch_str = branch.unwrap_or("main");
-                eprintln!("cloning {} ...", git_url);
-                git::clone(git_url, &pkg_dir, Some(branch_str))?;
-                eprintln!("cloned to {}", pkg_dir.display());
-
-                (
-                    SourceType::Git,
-                    Some(git_url.to_string()),
-                    Some(branch_str.to_string()),
-                    pkg_dir.to_string_lossy().to_string(),
-                    true,
-                )
-            }
-        } else {
-            // Local package — --path is required (already checked above).
-            let p = path.unwrap();
+    let (source_type, source_url, source_branch, resolved_path, auto_pull) = if let Some(git_url) =
+        git
+    {
+        // Git package — may or may not have an explicit --path.
+        if let Some(p) = path {
+            // Existing clone with remote tracking.
             let abs = resolve_and_validate_path(p)?;
-            (SourceType::Local, None, None, abs, false)
-        };
+            (
+                SourceType::Git,
+                Some(git_url.to_string()),
+                Some(branch.unwrap_or("main").to_string()),
+                abs,
+                true,
+            )
+        } else {
+            // Clone the repo to clone_dir/<identifier>.
+            let config = Config::load_or_default()?;
+            let clone_dir = expand_tilde(&config.clone_dir);
+            let pkg_dir = clone_dir.join(identifier);
+
+            if pkg_dir.exists() {
+                bail!(
+                    "clone target already exists: {}; remove it first or use --path to track it",
+                    pkg_dir.display()
+                );
+            }
+
+            let branch_str = branch.unwrap_or("main");
+            eprintln!("cloning {} ...", git_url);
+            git::clone(git_url, &pkg_dir, Some(branch_str))?;
+            eprintln!("cloned to {}", pkg_dir.display());
+
+            (
+                SourceType::Git,
+                Some(git_url.to_string()),
+                Some(branch_str.to_string()),
+                pkg_dir.to_string_lossy().to_string(),
+                true,
+            )
+        }
+    } else {
+        // Local package — --path is required (already checked above).
+        let p = path.unwrap();
+        let abs = resolve_and_validate_path(p)?;
+        (SourceType::Local, None, None, abs, false)
+    };
 
     let pkg = Package::new(
         identifier.to_string(),
@@ -194,12 +204,11 @@ fn cmd_remove(identifier: &str) -> Result<()> {
 fn cmd_show(identifier: &str, json: bool) -> Result<()> {
     let conn = open_db()?;
 
-    let pkg = Package::get_by_identifier(&conn, identifier)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Package '{identifier}' not found. Run `kcl list` to see available packages."
-            )
-        })?;
+    let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Package '{identifier}' not found. Run `kcl list` to see available packages."
+        )
+    })?;
 
     if json {
         let out = serde_json::to_string_pretty(&pkg)?;
@@ -231,12 +240,9 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
 
     if let Some(id) = identifier {
         // Pull a single package.
-        let pkg = Package::get_by_identifier(&conn, id)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Package '{id}' not found. Run `kcl list` to see available packages."
-                )
-            })?;
+        let pkg = Package::get_by_identifier(&conn, id)?.ok_or_else(|| {
+            anyhow::anyhow!("Package '{id}' not found. Run `kcl list` to see available packages.")
+        })?;
 
         if pkg.source_type != SourceType::Git {
             bail!("Package '{id}' is not a git package. Only git packages can be pulled.");
@@ -282,12 +288,11 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
 fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Result<()> {
     let conn = open_db()?;
 
-    let mut pkg = Package::get_by_identifier(&conn, identifier)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Package '{identifier}' not found. Run `kcl list` to see available packages."
-            )
-        })?;
+    let mut pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Package '{identifier}' not found. Run `kcl list` to see available packages."
+        )
+    })?;
 
     match key {
         "auto-pull" => {
@@ -298,14 +303,17 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
             match val {
                 "true" => pkg.auto_pull = true,
                 "false" => pkg.auto_pull = false,
-                other => bail!("invalid value for auto-pull: '{other}' (expected 'true' or 'false')"),
+                other => {
+                    bail!("invalid value for auto-pull: '{other}' (expected 'true' or 'false')")
+                }
             }
         }
         "harness" => {
             if unset {
                 pkg.harness = None;
             } else {
-                let val = value.ok_or_else(|| anyhow::anyhow!("missing value for harness (or use --unset)"))?;
+                let val = value
+                    .ok_or_else(|| anyhow::anyhow!("missing value for harness (or use --unset)"))?;
                 pkg.harness = Some(val.to_string());
             }
         }
@@ -395,41 +403,55 @@ mod tests {
     #[test]
     fn set_auto_pull() {
         let (conn, _pkg) = setup();
-        let mut pkg = Package::get_by_identifier(&conn, "testpkg").unwrap().unwrap();
+        let mut pkg = Package::get_by_identifier(&conn, "testpkg")
+            .unwrap()
+            .unwrap();
         assert!(!pkg.auto_pull);
 
         pkg.auto_pull = true;
         pkg.update(&conn).unwrap();
 
-        let updated = Package::get_by_identifier(&conn, "testpkg").unwrap().unwrap();
+        let updated = Package::get_by_identifier(&conn, "testpkg")
+            .unwrap()
+            .unwrap();
         assert!(updated.auto_pull);
     }
 
     #[test]
     fn set_harness() {
         let (conn, _pkg) = setup();
-        let mut pkg = Package::get_by_identifier(&conn, "testpkg").unwrap().unwrap();
+        let mut pkg = Package::get_by_identifier(&conn, "testpkg")
+            .unwrap()
+            .unwrap();
         assert!(pkg.harness.is_none());
 
         pkg.harness = Some("claude".to_string());
         pkg.update(&conn).unwrap();
 
-        let updated = Package::get_by_identifier(&conn, "testpkg").unwrap().unwrap();
+        let updated = Package::get_by_identifier(&conn, "testpkg")
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.harness.as_deref(), Some("claude"));
     }
 
     #[test]
     fn unset_harness() {
         let (conn, _pkg) = setup();
-        let mut pkg = Package::get_by_identifier(&conn, "testpkg").unwrap().unwrap();
+        let mut pkg = Package::get_by_identifier(&conn, "testpkg")
+            .unwrap()
+            .unwrap();
         pkg.harness = Some("claude".to_string());
         pkg.update(&conn).unwrap();
 
-        let mut pkg = Package::get_by_identifier(&conn, "testpkg").unwrap().unwrap();
+        let mut pkg = Package::get_by_identifier(&conn, "testpkg")
+            .unwrap()
+            .unwrap();
         pkg.harness = None;
         pkg.update(&conn).unwrap();
 
-        let updated = Package::get_by_identifier(&conn, "testpkg").unwrap().unwrap();
+        let updated = Package::get_by_identifier(&conn, "testpkg")
+            .unwrap()
+            .unwrap();
         assert!(updated.harness.is_none());
     }
 
@@ -447,7 +469,9 @@ mod tests {
     #[test]
     fn show_json_serialization() {
         let (conn, _pkg) = setup();
-        let pkg = Package::get_by_identifier(&conn, "testpkg").unwrap().unwrap();
+        let pkg = Package::get_by_identifier(&conn, "testpkg")
+            .unwrap()
+            .unwrap();
         let json = serde_json::to_string_pretty(&pkg).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.is_object());
