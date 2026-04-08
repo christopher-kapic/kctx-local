@@ -2,6 +2,8 @@
 name = "kcl"
 version = "0.1.0"
 edition = "2024"
+description = "Local Code Knowledge CLI — instant Q&A access to any codebase"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"

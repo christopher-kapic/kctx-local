@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 
 use crate::cli::PackagesCommand;
+use crate::config::Config;
 use crate::db;
 use crate::dirs;
 use crate::git;
@@ -93,7 +94,8 @@ fn cmd_add(
                 )
             } else {
                 // Clone the repo to clone_dir/<identifier>.
-                let clone_dir = dirs::data_dir()?.join("packages");
+                let config = Config::load_or_default()?;
+                let clone_dir = expand_tilde(&config.clone_dir);
                 let pkg_dir = clone_dir.join(identifier);
 
                 if pkg_dir.exists() {
@@ -137,6 +139,20 @@ fn cmd_add(
     pkg.insert(&conn)?;
     eprintln!("added package '{identifier}'");
     Ok(())
+}
+
+/// Expand a leading `~` to the user's home directory.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = ::dirs::home_dir() {
+            return home.join(rest);
+        }
+    } else if path == "~" {
+        if let Some(home) = ::dirs::home_dir() {
+            return home;
+        }
+    }
+    std::path::PathBuf::from(path)
 }
 
 /// Resolve a path to absolute form and validate it exists as a directory.
