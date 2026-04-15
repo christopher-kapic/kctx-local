@@ -29,21 +29,6 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
             },
         ),
         (
-            "openclaude",
-            HarnessConfig {
-                command: "openclaude".to_string(),
-                args: vec![
-                    "-p".to_string(),
-                    "--output-format".to_string(),
-                    "text".to_string(),
-                    "{prompt}".to_string(),
-                ],
-                prompt_mode: PromptMode::Arg,
-                model_args: vec!["--model".to_string(), "{model}".to_string()],
-                default_model: None,
-            },
-        ),
-        (
             "copilot",
             HarnessConfig {
                 command: "copilot".to_string(),
@@ -52,6 +37,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                     "{prompt}".to_string(),
                     "--silent".to_string(),
                     "--allow-all-paths".to_string(),
+                    "--allow-all".to_string(),
                 ],
                 prompt_mode: PromptMode::Arg,
                 // copilot uses `=`-style: `--model=<name>` (e.g.
@@ -90,13 +76,19 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
             HarnessConfig {
                 command: "codex".to_string(),
                 // codex's non-interactive entrypoint is the `exec`
-                // subcommand. Prompt is a positional arg. `--full-auto`
-                // auto-approves actions while keeping the workspace-write
-                // sandbox so we don't escape the package directory.
+                // subcommand. Prompt is a positional arg. The extra
+                // flags are the recommended headless defaults:
+                // `--skip-git-repo-check` allows running outside a git
+                // repo, `--ephemeral` avoids persisting session files,
+                // and `approval_policy=never` disables approval prompts
+                // so codex won't block on tool use.
                 args: vec![
                     "exec".to_string(),
-                    "--full-auto".to_string(),
                     "{prompt}".to_string(),
+                    "--skip-git-repo-check".to_string(),
+                    "--ephemeral".to_string(),
+                    "-c".to_string(),
+                    "approval_policy=never".to_string(),
                 ],
                 prompt_mode: PromptMode::Arg,
                 // codex accepts `-m <model>` / `--model <model>`.
@@ -104,13 +96,37 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 default_model: None,
             },
         ),
+        (
+            "goose",
+            HarnessConfig {
+                command: "goose".to_string(),
+                // goose non-interactive invocation is `goose run -t <prompt>`.
+                // `--no-session` skips persisting a session file so repeated
+                // ask invocations don't litter the filesystem.
+                args: vec![
+                    "run".to_string(),
+                    "-t".to_string(),
+                    "{prompt}".to_string(),
+                    "--no-session".to_string(),
+                ],
+                prompt_mode: PromptMode::Arg,
+                // goose accepts `--model <name>` on `run`. If your
+                // goose build instead requires `GOOSE_MODEL` env var,
+                // clear this and set the env var ambient.
+                model_args: vec!["--model".to_string(), "{model}".to_string()],
+                default_model: None,
+            },
+        ),
     ]
 }
 
+/// The canonical list of harness names kcl knows how to configure.
+/// Keep in sync with [`known_harnesses`].
+const KNOWN_HARNESS_NAMES: &[&str] = &["claude", "copilot", "pi", "opencode", "codex", "goose"];
+
 /// Scan PATH for known harnesses, returning names of those found.
 fn detect_harnesses() -> Vec<String> {
-    let names = ["claude", "openclaude", "copilot", "pi", "opencode", "codex"];
-    names
+    KNOWN_HARNESS_NAMES
         .iter()
         .filter(|name| which::which(name).is_ok())
         .map(|name| name.to_string())
@@ -340,7 +356,7 @@ pub fn run(non_interactive: bool) -> Result<()> {
         }
     }
 
-    let not_found: Vec<&str> = ["claude", "openclaude", "copilot", "pi", "opencode", "codex"]
+    let not_found: Vec<&str> = KNOWN_HARNESS_NAMES
         .iter()
         .filter(|n| !detected.contains(&n.to_string()))
         .copied()
@@ -368,11 +384,41 @@ mod tests {
         assert_eq!(harnesses.len(), 6);
         let names: Vec<&str> = harnesses.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"claude"));
-        assert!(names.contains(&"openclaude"));
         assert!(names.contains(&"copilot"));
         assert!(names.contains(&"pi"));
         assert!(names.contains(&"opencode"));
         assert!(names.contains(&"codex"));
+        assert!(names.contains(&"goose"));
+    }
+
+    #[test]
+    fn codex_uses_hardened_exec_flags() {
+        let harnesses = known_harnesses();
+        let (_, codex) = harnesses.iter().find(|(n, _)| *n == "codex").unwrap();
+        assert_eq!(codex.args[0], "exec");
+        assert!(codex.args.contains(&"{prompt}".to_string()));
+        assert!(codex.args.contains(&"--skip-git-repo-check".to_string()));
+        assert!(codex.args.contains(&"--ephemeral".to_string()));
+        assert!(codex.args.contains(&"approval_policy=never".to_string()));
+        assert!(!codex.args.contains(&"--full-auto".to_string()));
+    }
+
+    #[test]
+    fn copilot_passes_allow_all() {
+        let harnesses = known_harnesses();
+        let (_, copilot) = harnesses.iter().find(|(n, _)| *n == "copilot").unwrap();
+        assert!(copilot.args.contains(&"--allow-all".to_string()));
+        assert!(copilot.args.contains(&"--allow-all-paths".to_string()));
+    }
+
+    #[test]
+    fn goose_uses_run_subcommand() {
+        let harnesses = known_harnesses();
+        let (_, goose) = harnesses.iter().find(|(n, _)| *n == "goose").unwrap();
+        assert_eq!(goose.args[0], "run");
+        assert!(goose.args.contains(&"-t".to_string()));
+        assert!(goose.args.contains(&"{prompt}".to_string()));
+        assert!(goose.args.contains(&"--no-session".to_string()));
     }
 
     #[test]
