@@ -40,8 +40,10 @@ pub fn build_prompt(
     context: Option<&[String]>,
 ) -> String {
     let mut prompt = format!(
-        "You are answering a question about the {} ({}) codebase.\n\
-         The codebase is in your current working directory.\n",
+        concat!(
+            "You are answering a question about the {} ({}) codebase.\n",
+            "The codebase is in your current working directory.\n",
+        ),
         display_name, identifier
     );
 
@@ -58,8 +60,10 @@ pub fn build_prompt(
     }
 
     prompt.push_str(&format!(
-        "\nQuestion: {}\n\n\
-         Explore the codebase and answer precisely. Reference file paths.\n",
+        concat!(
+            "\nQuestion: {}\n\n",
+            "Explore the codebase and answer precisely. Reference file paths.\n",
+        ),
         question
     ));
 
