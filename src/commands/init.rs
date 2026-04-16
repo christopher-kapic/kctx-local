@@ -120,14 +120,15 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
     ]
 }
 
-/// The canonical list of harness names kcl knows how to configure.
-/// Keep in sync with [`known_harnesses`].
-const KNOWN_HARNESS_NAMES: &[&str] = &["claude", "copilot", "pi", "opencode", "codex", "goose"];
+/// Returns the canonical list of harness names, derived from [`known_harnesses`].
+fn known_harness_names() -> Vec<&'static str> {
+    known_harnesses().into_iter().map(|(name, _)| name).collect()
+}
 
 /// Scan PATH for known harnesses, returning names of those found.
 fn detect_harnesses() -> Vec<String> {
-    KNOWN_HARNESS_NAMES
-        .iter()
+    known_harness_names()
+        .into_iter()
         .filter(|name| which::which(name).is_ok())
         .map(|name| name.to_string())
         .collect()
@@ -356,7 +357,8 @@ pub fn run(non_interactive: bool) -> Result<()> {
         }
     }
 
-    let not_found: Vec<&str> = KNOWN_HARNESS_NAMES
+    let all_names = known_harness_names();
+    let not_found: Vec<&str> = all_names
         .iter()
         .filter(|n| !detected.contains(&n.to_string()))
         .copied()
