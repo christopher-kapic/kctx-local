@@ -3,9 +3,9 @@ use serde::Serialize;
 
 use crate::cli::HistoryCommand;
 use crate::db;
-use crate::paths;
 use crate::models::conversation::Conversation;
 use crate::models::package::Package;
+use crate::paths;
 
 /// A human-friendly summary of a conversation for list output.
 #[derive(Debug, Serialize)]

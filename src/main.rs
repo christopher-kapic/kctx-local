@@ -2,10 +2,10 @@ mod cli;
 mod commands;
 mod config;
 mod db;
-mod paths;
 mod git;
 mod harness;
 mod models;
+mod paths;
 
 use clap::Parser;
 
@@ -25,16 +25,19 @@ async fn main() {
             no_pull,
             branch,
             context,
-        } => commands::ask::run(commands::ask::AskArgs {
-            identifier,
-            question,
-            harness_override: harness.as_deref(),
-            model: model.as_deref(),
-            timeout_override: *timeout,
-            no_pull: *no_pull,
-            branch_override: branch.as_deref(),
-            context: *context,
-        }).await,
+        } => {
+            commands::ask::run(commands::ask::AskArgs {
+                identifier,
+                question,
+                harness_override: harness.as_deref(),
+                model: model.as_deref(),
+                timeout_override: *timeout,
+                no_pull: *no_pull,
+                branch_override: branch.as_deref(),
+                context: *context,
+            })
+            .await
+        }
 
         Command::List { verbose, json } => {
             let cmd = cli::PackagesCommand::List {

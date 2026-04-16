@@ -165,7 +165,9 @@ pub fn validate_git_url(url: &str) -> Result<()> {
         || (url.contains('@') && url.contains(':') && !url.contains("://"));
 
     if !valid {
-        bail!("invalid git URL: `{url}`. Expected a URL (https://, git://, ssh://, etc.) or SCP syntax (git@host:path)");
+        bail!(
+            "invalid git URL: `{url}`. Expected a URL (https://, git://, ssh://, etc.) or SCP syntax (git@host:path)"
+        );
     }
     Ok(())
 }
@@ -271,7 +273,12 @@ mod tests {
             .unwrap();
         // Point origin at a bogus URL so fetch fails.
         Command::new("git")
-            .args(["remote", "add", "origin", "https://example.invalid/no-repo.git"])
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/no-repo.git",
+            ])
             .current_dir(&tmp)
             .output()
             .unwrap();

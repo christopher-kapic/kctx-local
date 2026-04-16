@@ -121,7 +121,10 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
 
 /// Returns the canonical list of harness names, derived from [`known_harnesses`].
 pub(crate) fn known_harness_names() -> Vec<&'static str> {
-    known_harnesses().into_iter().map(|(name, _)| name).collect()
+    known_harnesses()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
 }
 
 /// Scan PATH for known harnesses, returning names of those found.
@@ -570,9 +573,21 @@ mod tests {
         assert!(dir.join("kcl.fish").exists());
 
         // Verify files are non-empty
-        assert!(!std::fs::read_to_string(dir.join("kcl.bash")).unwrap().is_empty());
-        assert!(!std::fs::read_to_string(dir.join("_kcl")).unwrap().is_empty());
-        assert!(!std::fs::read_to_string(dir.join("kcl.fish")).unwrap().is_empty());
+        assert!(
+            !std::fs::read_to_string(dir.join("kcl.bash"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !std::fs::read_to_string(dir.join("_kcl"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !std::fs::read_to_string(dir.join("kcl.fish"))
+                .unwrap()
+                .is_empty()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -159,7 +159,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(!has_old, "old single-column package_id index should be dropped");
+        assert!(
+            !has_old,
+            "old single-column package_id index should be dropped"
+        );
     }
 
     #[test]

@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::db;
-use crate::paths;
 use crate::git;
 use crate::harness;
 use crate::models::conversation::Conversation;
 use crate::models::package::{Package, SourceType};
+use crate::paths;
 
 /// The JSON log file written to disk for each conversation.
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,7 +175,8 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         timeout,
         true, // stream stdout to caller
         effective_model.as_deref(),
-    ).await;
+    )
+    .await;
 
     let finished_at = Utc::now();
 

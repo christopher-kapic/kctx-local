@@ -57,7 +57,12 @@ fn format_human(config: &Config) -> String {
         };
         writeln!(out, "  {}{}", name, marker).unwrap();
         writeln!(out, "    command:       {}", h.command).unwrap();
-        writeln!(out, "    prompt_mode:   {}", prompt_mode_str(&h.prompt_mode)).unwrap();
+        writeln!(
+            out,
+            "    prompt_mode:   {}",
+            prompt_mode_str(&h.prompt_mode)
+        )
+        .unwrap();
         writeln!(out, "    args:          {}", format_args(&h.args)).unwrap();
         if !h.model_args.is_empty() {
             writeln!(out, "    model_args:    {}", h.model_args.join(" ")).unwrap();

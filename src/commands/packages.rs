@@ -5,9 +5,9 @@ use anyhow::{Result, bail};
 use crate::cli::PackagesCommand;
 use crate::config::Config;
 use crate::db;
-use crate::paths;
 use crate::git;
 use crate::models::package::{Package, SourceType};
+use crate::paths;
 
 /// Helper to open the database from the default location.
 fn open_db() -> Result<rusqlite::Connection> {
@@ -623,17 +623,24 @@ mod tests {
     fn validate_identifier_rejects_traversal() {
         let result = validate_identifier("../../etc/cron.d");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
     }
 
     #[test]
     fn validate_identifier_rejects_empty() {
         let result = validate_identifier("");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
     }
 
     #[test]
@@ -672,9 +679,11 @@ mod tests {
 
         // Delete from DB.
         Package::delete(&conn, &_pkg.id).unwrap();
-        assert!(Package::get_by_identifier(&conn, "testpkg")
-            .unwrap()
-            .is_none());
+        assert!(
+            Package::get_by_identifier(&conn, "testpkg")
+                .unwrap()
+                .is_none()
+        );
 
         // Simulate the disk cleanup from cmd_remove.
         if pkg_clone.is_dir() {
