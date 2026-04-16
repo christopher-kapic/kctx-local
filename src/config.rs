@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,18 @@ pub fn validate_timeout(seconds: u64) -> Result<()> {
         );
     }
     Ok(())
+}
+
+impl FromStr for PromptMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "arg" => Ok(PromptMode::Arg),
+            "stdin" => Ok(PromptMode::Stdin),
+            _ => anyhow::bail!("invalid prompt_mode '{}': expected 'arg' or 'stdin'", s),
+        }
+    }
 }
 
 fn default_prompt_mode() -> PromptMode {
@@ -311,6 +324,23 @@ mod tests {
         assert_eq!(config, loaded);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prompt_mode_from_str_arg() {
+        assert_eq!("arg".parse::<PromptMode>().unwrap(), PromptMode::Arg);
+    }
+
+    #[test]
+    fn prompt_mode_from_str_stdin() {
+        assert_eq!("stdin".parse::<PromptMode>().unwrap(), PromptMode::Stdin);
+    }
+
+    #[test]
+    fn prompt_mode_from_str_invalid() {
+        let err = "bogus".parse::<PromptMode>().unwrap_err();
+        assert!(err.to_string().contains("invalid prompt_mode 'bogus'"));
+        assert!(err.to_string().contains("'arg' or 'stdin'"));
     }
 
     #[test]

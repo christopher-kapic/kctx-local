@@ -104,14 +104,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
                     harness.command = value.to_string();
                 }
                 "prompt_mode" => {
-                    harness.prompt_mode =
-                        serde_json::from_value(serde_json::Value::String(value.to_string()))
-                            .with_context(|| {
-                                format!(
-                                    "invalid prompt_mode '{}': expected 'arg' or 'stdin'",
-                                    value
-                                )
-                            })?;
+                    harness.prompt_mode = value.parse()?;
                 }
                 "default_model" => {
                     // Empty string clears the default model.
