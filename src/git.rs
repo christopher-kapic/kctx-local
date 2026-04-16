@@ -132,6 +132,26 @@ pub fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate that a string looks like a plausible git URL.
+///
+/// Accepts: https://, http://, git://, ssh://, file:// schemes,
+/// SCP-like syntax (e.g. git@host:user/repo), and absolute paths.
+pub fn validate_git_url(url: &str) -> Result<()> {
+    let valid = url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with("git://")
+        || url.starts_with("ssh://")
+        || url.starts_with("file://")
+        || url.starts_with('/')
+        // SCP-like: user@host:path
+        || (url.contains('@') && url.contains(':') && !url.contains("://"));
+
+    if !valid {
+        bail!("invalid git URL: '{url}'. Expected a URL (https://, git://, ssh://, etc.) or SCP syntax (git@host:path)");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +230,35 @@ mod tests {
     #[test]
     fn is_git_repo_false_for_regular_dir() {
         assert!(!is_git_repo(Path::new("/tmp")));
+    }
+
+    #[test]
+    fn validate_git_url_accepts_valid_urls() {
+        let valid = [
+            "https://github.com/user/repo.git",
+            "http://github.com/user/repo.git",
+            "git://github.com/user/repo.git",
+            "ssh://git@github.com/user/repo.git",
+            "file:///home/user/repo",
+            "git@github.com:user/repo.git",
+            "/home/user/local-repo",
+        ];
+        for url in valid {
+            assert!(validate_git_url(url).is_ok(), "should accept: {url}");
+        }
+    }
+
+    #[test]
+    fn validate_git_url_rejects_invalid_urls() {
+        let invalid = [
+            "not-a-url",
+            "ftp://example.com/repo",
+            "just some words",
+            "",
+            "relative/path/repo",
+        ];
+        for url in invalid {
+            assert!(validate_git_url(url).is_err(), "should reject: {url}");
+        }
     }
 }
