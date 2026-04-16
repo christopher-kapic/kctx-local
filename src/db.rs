@@ -13,12 +13,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)
         .with_context(|| format!("could not open database: {}", path.display()))?;
 
-    // Enable WAL mode for better concurrent read performance.
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    // Enable foreign key enforcement (off by default in SQLite).
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "busy_timeout", 5000)?;
-
+    apply_pragmas(&conn)?;
     migrate(&conn)?;
 
     Ok(conn)
@@ -28,10 +23,22 @@ pub fn open(path: &Path) -> Result<Connection> {
 #[cfg(test)]
 pub fn open_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory().context("could not open in-memory database")?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "busy_timeout", 5000)?;
+    apply_pragmas(&conn)?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// Apply connection-wide pragmas. SQLite silently ignores `journal_mode=WAL`
+/// for `:memory:` databases (it stays in "memory" mode), so this helper is
+/// safe to call from both disk-backed and in-memory `open*` paths.
+fn apply_pragmas(conn: &Connection) -> Result<()> {
+    // Enable WAL mode for better concurrent read performance (no-op for :memory:).
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    // Enable foreign key enforcement (off by default in SQLite).
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Block up to 5s on SQLITE_BUSY instead of failing immediately.
+    conn.pragma_update(None, "busy_timeout", 5000)?;
+    Ok(())
 }
 
 /// Run all schema migrations. Uses a simple user_version check.
