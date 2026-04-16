@@ -32,6 +32,7 @@ src/
     history.rs         — kcl history handler
     config_cmd.rs      — kcl config handler
     init.rs            — kcl init handler
+    harnesses.rs       — kcl harnesses handler
 ```
 
 ## Key Design Decisions
