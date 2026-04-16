@@ -177,14 +177,16 @@ pub fn run(args: AskArgs<'_>) -> Result<i32> {
 
     let finished_at = Utc::now();
 
-    // Handle harness execution result. Make sure we always restore the
-    // original branch (if we changed it) before propagating an error.
-    let output = match harness_result {
-        Ok(output) => output,
+    // Handle harness execution result. Regardless of success or failure we
+    // persist a conversation record so every invocation appears in `kcl history`.
+    let (response_text, exit_code) = match harness_result {
+        Ok(output) => {
+            let code = output.exit_code.unwrap_or(1);
+            (output.stdout, Some(code))
+        }
         Err(e) => {
             eprintln!("error: {}", e);
-            restore_branch(repo_path, original_branch.as_deref());
-            return Ok(2);
+            (format!("[error] {}", e), None)
         }
     };
 
@@ -214,8 +216,8 @@ pub fn run(args: AskArgs<'_>) -> Result<i32> {
         model: logged_model,
         started_at: started_at.to_rfc3339(),
         finished_at: finished_at.to_rfc3339(),
-        exit_code: output.exit_code,
-        response: output.stdout.clone(),
+        exit_code,
+        response: response_text,
     };
 
     let log_path = pkg_log_dir.join(&log_filename);
@@ -228,7 +230,7 @@ pub fn run(args: AskArgs<'_>) -> Result<i32> {
         package_id: pkg.id.clone(),
         question: question.to_string(),
         harness: harness_name,
-        exit_code: output.exit_code,
+        exit_code,
         log_path: relative_log_path,
         created_at: started_at,
     };
@@ -238,12 +240,10 @@ pub fn run(args: AskArgs<'_>) -> Result<i32> {
     //    harness exit code.
     restore_branch(repo_path, original_branch.as_deref());
 
-    let exit_code = output.exit_code.unwrap_or(1);
-    if exit_code != 0 {
-        return Ok(2);
+    match exit_code {
+        Some(0) => Ok(0),
+        _ => Ok(2),
     }
-
-    Ok(0)
 }
 
 /// Try to restore `repo_path` to the previously checked-out branch.
@@ -357,6 +357,61 @@ mod tests {
         assert_eq!(questions[0], "Question 4");
         assert_eq!(questions[1], "Question 3");
         assert_eq!(questions[2], "Question 2");
+    }
+
+    #[test]
+    fn conversation_log_captures_harness_error() {
+        let log = ConversationLog {
+            id: "err-123".to_string(),
+            package_id: "pkg-uuid".to_string(),
+            package_identifier: "broken-pkg".to_string(),
+            question: "Will this fail?".to_string(),
+            harness: "claude".to_string(),
+            model: None,
+            started_at: "2026-04-07T10:30:00+00:00".to_string(),
+            finished_at: "2026-04-07T10:30:05+00:00".to_string(),
+            exit_code: None,
+            response: "[error] harness timed out after 120s".to_string(),
+        };
+
+        let json = serde_json::to_string_pretty(&log).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["id"], "err-123");
+        assert_eq!(parsed["package_identifier"], "broken-pkg");
+        assert!(parsed["exit_code"].is_null());
+        assert!(parsed["response"].as_str().unwrap().starts_with("[error]"));
+    }
+
+    #[test]
+    fn failed_harness_creates_db_record() {
+        let conn = db::open_memory().unwrap();
+        let pkg = Package::new(
+            "fail-pkg".to_string(),
+            "Fail Package".to_string(),
+            SourceType::Local,
+            None,
+            None,
+            "/tmp/fail-pkg".to_string(),
+            false,
+            None,
+        );
+        pkg.insert(&conn).unwrap();
+
+        let conv = Conversation::new(
+            pkg.id.clone(),
+            "question that fails".to_string(),
+            "claude".to_string(),
+            None,
+            "/tmp/logs/fail.json".to_string(),
+        );
+        conv.insert(&conn).unwrap();
+
+        let retrieved = Conversation::get_by_id(&conn, &conv.id)
+            .unwrap()
+            .expect("failed conversation should be persisted");
+        assert_eq!(retrieved.exit_code, None);
+        assert_eq!(retrieved.question, "question that fails");
     }
 
     #[test]
