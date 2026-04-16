@@ -134,6 +134,7 @@ impl Package {
     }
 
     /// Retrieve a package by its UUID.
+    #[cfg(test)]
     #[allow(dead_code)]
     pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Self>> {
         let mut stmt = conn.prepare(
