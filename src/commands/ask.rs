@@ -189,11 +189,10 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
 
     // Handle harness execution result. Regardless of success or failure we
     // persist a conversation record so every invocation appears in `kcl history`.
+    // `exit_code = None` means the child had no exit status (killed by a signal)
+    // or kcl could not obtain one (spawn failure, timeout, interrupted wait).
     let (response_text, exit_code) = match harness_result {
-        Ok(output) => {
-            let code = output.exit_code.unwrap_or(1);
-            (output.stdout, Some(code))
-        }
+        Ok(output) => (output.stdout, output.exit_code),
         Err(e) => {
             eprintln!("error: {}", e);
             (format!("[error] {}", e), None)
@@ -261,9 +260,16 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     //    harness exit code.
     restore_branch(repo_path, original_branch.as_deref());
 
+    // Exit code semantics:
+    //   0 → harness succeeded
+    //   2 → harness terminated without a normal exit status (signal-killed,
+    //       spawn failure, timeout). Distinguished from harness errors because
+    //       the child did not get to report its own result.
+    //   3 → harness ran to completion but exited non-zero.
     match exit_code {
         Some(0) => Ok(0),
-        _ => Ok(2),
+        Some(_) => Ok(3),
+        None => Ok(2),
     }
 }
 
