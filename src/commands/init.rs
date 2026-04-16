@@ -121,7 +121,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
 }
 
 /// Returns the canonical list of harness names, derived from [`known_harnesses`].
-fn known_harness_names() -> Vec<&'static str> {
+pub(crate) fn known_harness_names() -> Vec<&'static str> {
     known_harnesses().into_iter().map(|(name, _)| name).collect()
 }
 

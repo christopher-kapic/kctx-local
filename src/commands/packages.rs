@@ -395,6 +395,13 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
             } else {
                 let val = value
                     .ok_or_else(|| anyhow::anyhow!("missing value for harness (or use --unset)"))?;
+                let known = super::init::known_harness_names();
+                if !known.contains(&val) {
+                    bail!(
+                        "Unknown harness '{val}'. Valid harnesses: {}",
+                        known.join(", ")
+                    );
+                }
                 pkg.harness = Some(val.to_string());
             }
         }
@@ -701,6 +708,17 @@ mod tests {
         let result = expand_tilde("~").unwrap();
         let home = dirs::home_dir().unwrap();
         assert_eq!(result, home);
+    }
+
+    #[test]
+    fn set_harness_rejects_unknown() {
+        let known = crate::commands::init::known_harness_names();
+        // A bogus harness name should not be in the known list.
+        assert!(!known.contains(&"nonexistent"));
+        assert!(!known.contains(&"bogus-harness"));
+        // Valid harness names should be present.
+        assert!(known.contains(&"claude"));
+        assert!(known.contains(&"copilot"));
     }
 
     #[test]
