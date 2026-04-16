@@ -99,7 +99,13 @@ fn cmd_edit() -> Result<()> {
     }
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-    let status = std::process::Command::new(&editor)
+    let parts = shlex::split(&editor)
+        .with_context(|| format!("failed to parse EDITOR value `{}`", editor))?;
+    let (program, extra_args) = parts
+        .split_first()
+        .with_context(|| format!("EDITOR value `{}` is empty", editor))?;
+    let status = std::process::Command::new(program)
+        .args(extra_args)
         .arg(&path)
         .status()
         .with_context(|| format!("failed to launch editor `{}`", editor))?;
