@@ -389,6 +389,20 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
     Ok(())
 }
 
+fn validate_harness_configured(config: &Config, name: &str) -> Result<()> {
+    if config.harnesses.contains_key(name) {
+        return Ok(());
+    }
+    let mut configured: Vec<&str> = config.harnesses.keys().map(String::as_str).collect();
+    configured.sort();
+    let valid = if configured.is_empty() {
+        "(none configured; run `kcl init` to add harnesses)".to_string()
+    } else {
+        configured.join(", ")
+    };
+    bail!("Unknown harness `{name}`. Configured harnesses: {valid}");
+}
+
 fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Result<()> {
     let conn = open_db()?;
 
@@ -418,13 +432,8 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
             } else {
                 let val = value
                     .ok_or_else(|| anyhow::anyhow!("missing value for harness (or use --unset)"))?;
-                let known = super::init::known_harness_names();
-                if !known.contains(&val) {
-                    bail!(
-                        "Unknown harness `{val}`. Valid harnesses: {}",
-                        known.join(", ")
-                    );
-                }
+                let config = Config::load_or_default()?;
+                validate_harness_configured(&config, val)?;
                 pkg.harness = Some(val.to_string());
             }
         }
@@ -786,14 +795,47 @@ mod tests {
     }
 
     #[test]
-    fn set_harness_rejects_unknown() {
-        let known = crate::commands::init::known_harness_names();
-        // A bogus harness name should not be in the known list.
-        assert!(!known.contains(&"nonexistent"));
-        assert!(!known.contains(&"bogus-harness"));
-        // Valid harness names should be present.
-        assert!(known.contains(&"claude"));
-        assert!(known.contains(&"copilot"));
+    fn validate_harness_accepts_configured_name() {
+        use crate::config::{HarnessConfig, PromptMode};
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "my-custom".to_string(),
+            HarnessConfig {
+                command: "my-agent".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+        validate_harness_configured(&config, "my-custom").unwrap();
+    }
+
+    #[test]
+    fn validate_harness_rejects_unconfigured_name() {
+        use crate::config::{HarnessConfig, PromptMode};
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+        let err = validate_harness_configured(&config, "nonexistent").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown harness `nonexistent`"));
+        assert!(msg.contains("claude"));
+    }
+
+    #[test]
+    fn validate_harness_reports_when_none_configured() {
+        let config = Config::default();
+        let err = validate_harness_configured(&config, "anything").unwrap_err();
+        assert!(err.to_string().contains("none configured"));
     }
 
     #[test]
