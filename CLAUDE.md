@@ -83,6 +83,10 @@ Releases are fully automated via `.github/workflows/release.yml`:
 
 `scripts/install.sh` is the user-facing `curl | bash` installer. If you change binary name, target list, or release asset naming, update both the workflow and the script together.
 
+## Known Dependency Duplications
+
+- **`getrandom` 0.2 and 0.4** both appear in `Cargo.lock`. `getrandom 0.2` is pulled in transitively by `dirs` → `dirs-sys` → `redox_users`; `getrandom 0.4` is pulled in by `uuid`. All intermediate crates are at their latest stable releases, so this cannot be resolved without forking `dirs` or replacing it with another platform-dir crate. Accepted as-is.
+
 ## Related Projects
 
 - **kctx** (sibling at `../kctx/`) — Server-based MCP dependency knowledge service. kcl is the local-first complement.
