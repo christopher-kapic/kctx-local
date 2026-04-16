@@ -182,6 +182,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires network access; run with `cargo test -- --ignored`
     fn clone_creates_directory_and_repo() {
         let tmp = std::env::temp_dir().join("kcl-test-git-clone");
         // Clean up from any previous run.
@@ -203,6 +204,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires network access; run with `cargo test -- --ignored`
     fn pull_on_cloned_repo() {
         let tmp = std::env::temp_dir().join("kcl-test-git-pull");
         let _ = std::fs::remove_dir_all(&tmp);
