@@ -14,7 +14,7 @@ The full design spec is in `kcl-plan.md` at the project root. Read it before mak
 - **Async:** tokio (for subprocess management and streaming)
 - **Serialization:** serde + serde_json
 - **Platform dirs:** dirs crate
-- **Error handling:** anyhow + thiserror
+- **Error handling:** anyhow
 
 ## Project Structure
 
