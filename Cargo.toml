@@ -1,6 +1,6 @@
 [package]
 name = "kcl"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 rust-version = "1.85"
 description = "Local Code Knowledge CLI — instant Q&A access to any codebase"
@@ -16,6 +16,7 @@ libc = "0.2"
 rusqlite = { version = "0.34", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+shlex = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "signal"] }
 uuid = { version = "1", features = ["v4"] }

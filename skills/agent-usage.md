@@ -63,7 +63,8 @@ kcl ask hono "trace the full request lifecycle" --timeout 300
 
 - **Exit code 0** — success, the harness answered the question
 - **Exit code 1** — kcl error (bad identifier, config issue, etc.)
-- **Exit code 2** — harness error (the underlying agent failed)
+- **Exit code 2** — harness terminated without a normal exit status (signal-killed, spawn failure, timeout) — the child never got to report its own result
+- **Exit code 3** — harness ran to completion but exited non-zero (the underlying agent failed)
 
 Check exit codes to decide whether to retry or adjust your question.
 

@@ -2,10 +2,6 @@
 
 A Rust CLI that gives agents and humans instant Q&A access to any codebase on the local machine. Clones repos to disk and invokes coding harnesses (Claude Code, opencode, copilot, etc.) in non-interactive mode to answer queries. No server, no API keys for kcl itself.
 
-## Design Spec
-
-The full design spec is in `kcl-plan.md` at the project root. Read it before making changes.
-
 ## Tech Stack
 
 - **Language:** Rust
@@ -14,7 +10,7 @@ The full design spec is in `kcl-plan.md` at the project root. Read it before mak
 - **Async:** tokio (for subprocess management and streaming)
 - **Serialization:** serde + serde_json
 - **Platform dirs:** dirs crate
-- **Error handling:** anyhow + thiserror
+- **Error handling:** anyhow
 
 ## Project Structure
 
@@ -24,7 +20,7 @@ src/
   cli.rs               — Clap command/arg definitions
   config.rs            — Config loading (~/.config/kcl/config.json)
   db.rs                — SQLite connection, migrations
-  dirs.rs              — Platform directory resolution
+  paths.rs             — Platform directory resolution
   models/
     package.rs         — Package struct + CRUD
     conversation.rs    — Conversation index + CRUD
@@ -46,7 +42,7 @@ src/
 - **Conversation logs** as JSON files at `~/.local/state/kcl/logs/<package>/<timestamp>-<id>.json`
 - **Conversation index** in SQLite for fast listing/filtering; full logs on disk
 - **Shell out to `git`** rather than libgit2 — simpler, respects user's git config/SSH
-- **Exit codes:** 0 = success, 1 = kcl error, 2 = harness error
+- **Exit codes:** 0 = success, 1 = kcl error, 2 = harness terminated without a normal exit status (signal-killed, spawn failure, timeout), 3 = harness ran to completion but exited non-zero
 - **Agent-friendly output:** `--json` flag on read commands, terse defaults, no color in non-TTY
 - **User-facing message delimiters:** wrap identifiers and literal values in backticks (e.g. ``Package `axum` not found``, ``expected `true` or `false` ``) in error, warning, and status messages. Do not use single quotes for this purpose. Single quotes are reserved for Rust char literals and SQL string literals.
 

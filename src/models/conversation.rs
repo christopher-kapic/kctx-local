@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
 use uuid::Uuid;
 
 /// A conversation log entry — an indexed record of a Q&A session.
@@ -21,7 +20,7 @@ pub struct Conversation {
 
 impl Conversation {
     /// Create a new Conversation with a generated UUID and current timestamp.
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn new(
         package_id: String,
         question: String,
@@ -60,7 +59,7 @@ impl Conversation {
     }
 
     /// List conversations for a given package, ordered by most recent first.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn list_by_package(conn: &Connection, package_id: &str) -> Result<Vec<Self>> {
         let mut stmt = conn.prepare(
             "SELECT id, package_id, question, harness, exit_code, log_path, created_at

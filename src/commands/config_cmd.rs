@@ -1,3 +1,6 @@
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result, bail};
 
 use crate::cli::ConfigCommand;
@@ -98,8 +101,21 @@ fn cmd_edit() -> Result<()> {
         );
     }
 
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        bail!(
+            "`kcl config edit` requires an interactive terminal. Edit {} directly or use `kcl config set`.",
+            path.display()
+        );
+    }
+
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-    let status = std::process::Command::new(&editor)
+    let parts = shlex::split(&editor)
+        .with_context(|| format!("failed to parse EDITOR value `{}`", editor))?;
+    let (program, extra_args) = parts
+        .split_first()
+        .with_context(|| format!("EDITOR value `{}` is empty", editor))?;
+    let status = std::process::Command::new(program)
+        .args(extra_args)
         .arg(&path)
         .status()
         .with_context(|| format!("failed to launch editor `{}`", editor))?;
@@ -119,7 +135,13 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
         );
     }
 
-    let mut config = Config::load(&path)?;
+    with_config_lock(&path, || apply_set(&path, key, value))?;
+    println!("Updated {} = {}", key, value);
+    Ok(())
+}
+
+fn apply_set(path: &Path, key: &str, value: &str) -> Result<()> {
+    let mut config = Config::load(path)?;
 
     match key {
         "clone_dir" => {
@@ -139,15 +161,18 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
             // Support dot-notation for harness properties:
             //   harnesses.<name>.command
             //   harnesses.<name>.prompt_mode
-            let parts: Vec<&str> = key.splitn(4, '.').collect();
-            if parts.len() < 3 {
-                bail!(
+            //   harnesses.<name>.args
+            //   harnesses.<name>.default_model
+            // The <name> may itself contain dots, so split off the final
+            // segment as the property and treat everything before it as the name.
+            let suffix = key.strip_prefix("harnesses.").unwrap();
+            let (harness_name, property) = match suffix.rsplit_once('.') {
+                Some((name, prop)) if !name.is_empty() && !prop.is_empty() => (name, prop),
+                _ => bail!(
                     "Invalid harness key `{}`. Expected harnesses.<name>.<property>",
                     key
-                );
-            }
-            let harness_name = parts[1];
-            let property = parts[2];
+                ),
+            };
 
             let harness = config
                 .harnesses
@@ -162,10 +187,21 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
 
             match property {
                 "command" => {
+                    if value.is_empty() {
+                        bail!("harness `command` must not be empty");
+                    }
                     harness.command = value.to_string();
                 }
                 "prompt_mode" => {
                     harness.prompt_mode = value.parse()?;
+                }
+                "args" => {
+                    harness.args = if value.is_empty() {
+                        Vec::new()
+                    } else {
+                        shlex::split(value)
+                            .with_context(|| format!("failed to parse args value `{}`", value))?
+                    };
                 }
                 "default_model" => {
                     // Empty string clears the default model.
@@ -177,10 +213,18 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
                 }
                 _ => {
                     bail!(
-                        "Unknown harness property `{}`. Valid: command, prompt_mode, default_model",
+                        "Unknown harness property `{}`. Valid: command, prompt_mode, args, default_model",
                         property
                     );
                 }
+            }
+
+            if harness.command.is_empty() {
+                bail!(
+                    "harness `{}` has no command set. Set harnesses.{}.command first",
+                    harness_name,
+                    harness_name
+                );
             }
         }
         _ => {
@@ -191,9 +235,68 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
         }
     }
 
-    config.save(&path)?;
-    println!("Updated {} = {}", key, value);
+    config.save(path)?;
     Ok(())
+}
+
+/// Execute `f` while holding an exclusive advisory lock on a sidecar lock file
+/// beside the config. This serializes concurrent `kcl config set` invocations
+/// so their read-modify-write sequences cannot interleave and silently drop
+/// each other's changes.
+///
+/// The lock is taken on a sidecar (e.g. `.config.json.lock`) rather than on
+/// the config file itself because [`Config::save`] replaces the config via
+/// atomic rename, which changes the inode. Locking the sidecar — which is
+/// never renamed — keeps all writers synchronized on a stable target.
+fn with_config_lock<T>(config_path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    #[cfg(unix)]
+    let _guard = acquire_config_lock(config_path)?;
+    #[cfg(not(unix))]
+    let _ = config_path;
+    f()
+}
+
+#[cfg(unix)]
+fn acquire_config_lock(config_path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+
+    let lock_path = config_lock_path(config_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+    }
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening lock file {}", lock_path.display()))?;
+
+    loop {
+        let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if rc == 0 {
+            return Ok(lock_file);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(anyhow::anyhow!(
+            "failed to acquire lock on {}: {}",
+            lock_path.display(),
+            err
+        ));
+    }
+}
+
+fn config_lock_path(config_path: &Path) -> PathBuf {
+    let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let filename = config_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config");
+    parent.join(format!(".{}.lock", filename))
 }
 
 fn cmd_path() -> Result<()> {
@@ -342,5 +445,73 @@ mod tests {
         assert!(out.contains("args:          -"));
         assert!(out.contains("model_args:    --model {model}"));
         assert!(out.contains("default_model: claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn config_lock_path_is_hidden_sidecar() {
+        use std::path::Path;
+        let p = super::config_lock_path(Path::new("/home/u/.config/kcl/config.json"));
+        assert_eq!(
+            p,
+            Path::new("/home/u/.config/kcl/.config.json.lock").to_path_buf()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_config_lock_serializes_concurrent_writers() {
+        // Spawn two threads that each read-modify-write the same config under
+        // the lock. Without locking, their interleaved load/save sequences
+        // would race and one thread's change would be lost. With locking,
+        // both changes must be present in the final config.
+        use std::sync::Arc;
+        use std::thread;
+
+        let (path, _cleanup) = setup_test_config();
+        let path = Arc::new(path);
+
+        let handles: Vec<_> = (0..2)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                thread::spawn(move || {
+                    for _ in 0..20 {
+                        super::with_config_lock(&path, || {
+                            let mut config = Config::load(&path).unwrap();
+                            // Each thread writes to a different field.
+                            if i == 0 {
+                                let n: u64 = config
+                                    .clone_dir
+                                    .strip_prefix("count-")
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(0);
+                                // Simulate work between load and save to widen
+                                // the race window.
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                                config.clone_dir = format!("count-{}", n + 1);
+                            } else {
+                                let n: u64 = config
+                                    .default_harness
+                                    .strip_prefix("h-")
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(0);
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                                config.default_harness = format!("h-{}", n + 1);
+                            }
+                            config.save(&path)?;
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_config = Config::load(&path).unwrap();
+        assert_eq!(final_config.clone_dir, "count-20");
+        assert_eq!(final_config.default_harness, "h-20");
     }
 }

@@ -44,10 +44,10 @@ async fn main() {
                 verbose: *verbose,
                 json: *json,
             };
-            commands::packages::run(&cmd).map(|()| 0)
+            commands::packages::run(&cmd).await.map(|()| 0)
         }
 
-        Command::Packages { command } => commands::packages::run(command).map(|()| 0),
+        Command::Packages { command } => commands::packages::run(command).await.map(|()| 0),
 
         Command::History { command } => commands::history::run(command).map(|()| 0),
 

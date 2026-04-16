@@ -16,7 +16,7 @@ pub struct HarnessOutput {
     /// The full captured stdout.
     pub stdout: String,
     /// The full captured stderr.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub stderr: String,
 }
 
@@ -40,8 +40,10 @@ pub fn build_prompt(
     context: Option<&[String]>,
 ) -> String {
     let mut prompt = format!(
-        "You are answering a question about the {} ({}) codebase.\n\
-         The codebase is in your current working directory.\n",
+        concat!(
+            "You are answering a question about the {} ({}) codebase.\n",
+            "The codebase is in your current working directory.\n",
+        ),
         display_name, identifier
     );
 
@@ -58,8 +60,10 @@ pub fn build_prompt(
     }
 
     prompt.push_str(&format!(
-        "\nQuestion: {}\n\n\
-         Explore the codebase and answer precisely. Reference file paths.\n",
+        concat!(
+            "\nQuestion: {}\n\n",
+            "Explore the codebase and answer precisely. Reference file paths.\n",
+        ),
         question
     ));
 
@@ -98,11 +102,36 @@ pub fn build_args(harness: &HarnessConfig, prompt: &str, model: Option<&str>) ->
 #[cfg(unix)]
 async fn setup_signal_handler() {
     use tokio::signal::unix::{SignalKind, signal};
-    let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
-    let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
-    tokio::select! {
-        _ = sigint.recv() => {}
-        _ = sigterm.recv() => {}
+    let sigint = match signal(SignalKind::interrupt()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("warning: failed to register SIGINT handler: {}", e);
+            None
+        }
+    };
+    let sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("warning: failed to register SIGTERM handler: {}", e);
+            None
+        }
+    };
+    match (sigint, sigterm) {
+        (Some(mut sigint), Some(mut sigterm)) => {
+            tokio::select! {
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        (Some(mut sigint), None) => {
+            sigint.recv().await;
+        }
+        (None, Some(mut sigterm)) => {
+            sigterm.recv().await;
+        }
+        (None, None) => {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -121,15 +150,25 @@ async fn kill_and_reap(child: &mut tokio::process::Child) {
     {
         if let Some(pid) = child.id() {
             // Safety: sending a signal to a process group is a well-defined POSIX operation.
-            unsafe {
-                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            let ret = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+            if ret == -1 {
+                let err = std::io::Error::last_os_error();
+                // ESRCH means the process group already exited — not worth reporting.
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    eprintln!(
+                        "warning: failed to kill harness process group (pid {}): {}",
+                        pid, err
+                    );
+                }
             }
         }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = child.kill().await;
+        if let Err(e) = child.kill().await {
+            eprintln!("warning: failed to kill harness process: {}", e);
+        }
     }
 
     let _ = child.wait().await;
@@ -277,7 +316,13 @@ pub async fn run_harness(
         }
     }
 
-    let status = child.wait().await.context("waiting for harness to exit")?;
+    let status = match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+        Ok(res) => res.context("waiting for harness to exit")?,
+        Err(_) => {
+            kill_and_reap(&mut child).await;
+            bail!("harness did not exit after closing output pipes");
+        }
+    };
 
     Ok(HarnessOutput {
         exit_code: status.code(),

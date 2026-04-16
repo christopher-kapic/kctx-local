@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::cli::PackagesCommand;
 use crate::config::Config;
@@ -15,7 +15,7 @@ fn open_db() -> Result<rusqlite::Connection> {
     db::open(&db_path)
 }
 
-pub fn run(command: &PackagesCommand) -> Result<()> {
+pub async fn run(command: &PackagesCommand) -> Result<()> {
     match command {
         PackagesCommand::List { verbose, json } => cmd_list(*verbose, *json),
         PackagesCommand::Add {
@@ -23,15 +23,18 @@ pub fn run(command: &PackagesCommand) -> Result<()> {
             path,
             git,
             branch,
-        } => cmd_add(
-            identifier,
-            path.as_deref(),
-            git.as_deref(),
-            branch.as_deref(),
-        ),
+        } => {
+            cmd_add(
+                identifier,
+                path.as_deref(),
+                git.as_deref(),
+                branch.as_deref(),
+            )
+            .await
+        }
         PackagesCommand::Remove { identifier } => cmd_remove(identifier),
         PackagesCommand::Show { identifier, json } => cmd_show(identifier, *json),
-        PackagesCommand::Pull { identifier, all } => cmd_pull(identifier.as_deref(), *all),
+        PackagesCommand::Pull { identifier, all } => cmd_pull(identifier.as_deref(), *all).await,
         PackagesCommand::Set {
             identifier,
             key,
@@ -82,7 +85,7 @@ fn validate_identifier(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_add(
+async fn cmd_add(
     identifier: &str,
     path: Option<&str>,
     git: Option<&str>,
@@ -109,15 +112,15 @@ fn cmd_add(
     let (source_type, source_url, source_branch, resolved_path, auto_pull) = if let Some(git_url) =
         git
     {
+        // Validate URL structurally for all git cases — fresh clones would
+        // otherwise only fail inside git, and --path clones never run git.
+        git::validate_git_url(git_url)?;
         // Git package — may or may not have an explicit --path.
         if let Some(p) = path {
-            // Existing clone with remote tracking. Validate URL structurally
-            // since git clone won't run to catch bad URLs.
-            git::validate_git_url(git_url)?;
             let abs = resolve_and_validate_path(p)?;
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
-                None => git::current_branch(Path::new(&abs)).ok(),
+                None => git::current_branch(Path::new(&abs)).await.ok(),
             };
             (
                 SourceType::Git,
@@ -131,13 +134,35 @@ fn cmd_add(
             // reuse its on-disk clone instead of cloning a second time. This
             // lets monorepos be registered under multiple identifiers.
             let pkg_dir = std::path::PathBuf::from(&existing.path);
-            eprintln!(
-                "reusing existing clone at {} (already registered as `{}`)",
-                existing.path, existing.identifier
-            );
+            if std::fs::exists(&pkg_dir).with_context(|| {
+                format!("failed to check existing clone at {}", pkg_dir.display())
+            })? {
+                eprintln!(
+                    "reusing existing clone at {} (already registered as `{}`)",
+                    existing.path, existing.identifier
+                );
+            } else {
+                eprintln!(
+                    "existing clone at {} was removed; re-cloning (originally registered as `{}`)",
+                    existing.path, existing.identifier
+                );
+                if let Err(e) = git::clone(git_url, &pkg_dir, branch).await {
+                    if pkg_dir.exists() {
+                        if let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir) {
+                            eprintln!(
+                                "warning: failed to clean up partial clone at {}: {}",
+                                pkg_dir.display(),
+                                cleanup_err
+                            );
+                        }
+                    }
+                    return Err(e);
+                }
+                eprintln!("cloned to {}", pkg_dir.display());
+            }
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
-                None => git::current_branch(&pkg_dir).ok(),
+                None => git::current_branch(&pkg_dir).await.ok(),
             };
             (
                 SourceType::Git,
@@ -162,7 +187,7 @@ fn cmd_add(
             }
 
             eprintln!("cloning {} ...", git_url);
-            if let Err(e) = git::clone(git_url, &pkg_dir, branch) {
+            if let Err(e) = git::clone(git_url, &pkg_dir, branch).await {
                 // Clean up partial clone directory so a retry doesn't hit
                 // "clone target already exists".
                 if pkg_dir.exists() {
@@ -182,7 +207,7 @@ fn cmd_add(
             // --branch value or the remote's default).
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
-                None => git::current_branch(&pkg_dir).ok(),
+                None => git::current_branch(&pkg_dir).await.ok(),
             };
 
             (
@@ -339,7 +364,7 @@ fn cmd_show(identifier: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
+async fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
     let conn = open_db()?;
 
     if let Some(id) = identifier {
@@ -354,7 +379,7 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
 
         let repo_path = Path::new(&pkg.path);
         eprintln!("pulling {} ...", pkg.identifier);
-        let msg = git::pull(repo_path)?;
+        let msg = git::pull(repo_path).await?;
         eprintln!("{}: {}", pkg.identifier, msg);
     } else if all {
         // Pull all auto-pull-enabled git packages.
@@ -369,7 +394,7 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
 
             let repo_path = Path::new(&pkg.path);
             eprintln!("pulling {} ...", pkg.identifier);
-            match git::pull(repo_path) {
+            match git::pull(repo_path).await {
                 Ok(msg) => {
                     eprintln!("{}: {}", pkg.identifier, msg);
                     pulled += 1;
@@ -387,6 +412,20 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_harness_configured(config: &Config, name: &str) -> Result<()> {
+    if config.harnesses.contains_key(name) {
+        return Ok(());
+    }
+    let mut configured: Vec<&str> = config.harnesses.keys().map(String::as_str).collect();
+    configured.sort();
+    let valid = if configured.is_empty() {
+        "(none configured; run `kcl init` to add harnesses)".to_string()
+    } else {
+        configured.join(", ")
+    };
+    bail!("Unknown harness `{name}`. Configured harnesses: {valid}");
 }
 
 fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Result<()> {
@@ -418,13 +457,8 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
             } else {
                 let val = value
                     .ok_or_else(|| anyhow::anyhow!("missing value for harness (or use --unset)"))?;
-                let known = super::init::known_harness_names();
-                if !known.contains(&val) {
-                    bail!(
-                        "Unknown harness `{val}`. Valid harnesses: {}",
-                        known.join(", ")
-                    );
-                }
+                let config = Config::load_or_default()?;
+                validate_harness_configured(&config, val)?;
                 pkg.harness = Some(val.to_string());
             }
         }
@@ -786,14 +820,47 @@ mod tests {
     }
 
     #[test]
-    fn set_harness_rejects_unknown() {
-        let known = crate::commands::init::known_harness_names();
-        // A bogus harness name should not be in the known list.
-        assert!(!known.contains(&"nonexistent"));
-        assert!(!known.contains(&"bogus-harness"));
-        // Valid harness names should be present.
-        assert!(known.contains(&"claude"));
-        assert!(known.contains(&"copilot"));
+    fn validate_harness_accepts_configured_name() {
+        use crate::config::{HarnessConfig, PromptMode};
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "my-custom".to_string(),
+            HarnessConfig {
+                command: "my-agent".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+        validate_harness_configured(&config, "my-custom").unwrap();
+    }
+
+    #[test]
+    fn validate_harness_rejects_unconfigured_name() {
+        use crate::config::{HarnessConfig, PromptMode};
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+        let err = validate_harness_configured(&config, "nonexistent").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown harness `nonexistent`"));
+        assert!(msg.contains("claude"));
+    }
+
+    #[test]
+    fn validate_harness_reports_when_none_configured() {
+        let config = Config::default();
+        let err = validate_harness_configured(&config, "anything").unwrap_err();
+        assert!(err.to_string().contains("none configured"));
     }
 
     #[test]
