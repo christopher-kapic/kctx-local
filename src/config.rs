@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -120,13 +121,23 @@ impl Config {
     }
 
     /// Save config to the given path, creating parent directories as needed.
+    /// Uses atomic temp-file + rename to prevent corruption on crash.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating directory {}", parent.display()))?;
-        }
+        let parent = path
+            .parent()
+            .context("config path has no parent directory")?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+
         let json = serde_json::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(path, json).with_context(|| format!("writing {}", path.display()))?;
+
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)
+            .with_context(|| format!("creating temp file in {}", parent.display()))?;
+        tmp.write_all(json.as_bytes())
+            .context("writing config to temp file")?;
+        tmp.flush().context("flushing config temp file")?;
+        tmp.persist(path)
+            .with_context(|| format!("persisting config to {}", path.display()))?;
         Ok(())
     }
 }
@@ -276,6 +287,28 @@ mod tests {
 
         let err = Config::load(&path).unwrap_err();
         assert!(err.to_string().contains("at least 1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_is_atomic_no_temp_files_left() {
+        let dir = std::env::temp_dir().join("kcl-test-atomic-save");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config.json");
+
+        let config = Config::default();
+        config.save(&path).unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "only config.json should remain");
+        assert_eq!(entries[0].file_name(), "config.json");
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(config, loaded);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
