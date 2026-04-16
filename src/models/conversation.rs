@@ -59,7 +59,7 @@ impl Conversation {
     }
 
     /// List conversations for a given package, ordered by most recent first.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn list_by_package(conn: &Connection, package_id: &str) -> Result<Vec<Self>> {
         let mut stmt = conn.prepare(
             "SELECT id, package_id, question, harness, exit_code, log_path, created_at
