@@ -139,9 +139,9 @@ fn detect_harnesses() -> Vec<String> {
 fn select_default_harness(detected: &[String], non_interactive: bool) -> Result<String> {
     match detected.len() {
         0 => {
-            eprintln!("Warning: no known harnesses found in PATH. Defaulting to 'claude'.");
+            eprintln!("Warning: no known harnesses found in PATH. Defaulting to `claude`.");
             eprintln!(
-                "Install a supported harness or configure one manually with 'kcl config set'."
+                "Install a supported harness or configure one manually with `kcl config set`."
             );
             Ok("claude".to_string())
         }
@@ -153,7 +153,7 @@ fn select_default_harness(detected: &[String], non_interactive: bool) -> Result<
             if non_interactive {
                 // Pick first detected
                 eprintln!(
-                    "Multiple harnesses found: {}. Auto-selecting '{}'.",
+                    "Multiple harnesses found: {}. Auto-selecting `{}`.",
                     detected.join(", "),
                     detected[0]
                 );

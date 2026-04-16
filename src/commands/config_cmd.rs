@@ -41,7 +41,7 @@ fn cmd_edit() -> Result<()> {
     let status = std::process::Command::new(&editor)
         .arg(&path)
         .status()
-        .with_context(|| format!("failed to launch editor '{}'", editor))?;
+        .with_context(|| format!("failed to launch editor `{}`", editor))?;
 
     if !status.success() {
         bail!("editor exited with status {}", status);
@@ -70,7 +70,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
         "default_timeout" => {
             let timeout: u64 = value
                 .parse()
-                .with_context(|| format!("invalid timeout value '{}': expected integer", value))?;
+                .with_context(|| format!("invalid timeout value `{}`: expected integer", value))?;
             crate::config::validate_timeout(timeout)?;
             config.default_timeout = timeout;
         }
@@ -81,7 +81,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
             let parts: Vec<&str> = key.splitn(4, '.').collect();
             if parts.len() < 3 {
                 bail!(
-                    "Invalid harness key '{}'. Expected harnesses.<name>.<property>",
+                    "Invalid harness key `{}`. Expected harnesses.<name>.<property>",
                     key
                 );
             }
@@ -116,7 +116,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
                 }
                 _ => {
                     bail!(
-                        "Unknown harness property '{}'. Valid: command, prompt_mode, default_model",
+                        "Unknown harness property `{}`. Valid: command, prompt_mode, default_model",
                         property
                     );
                 }
@@ -124,7 +124,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
         }
         _ => {
             bail!(
-                "Unknown config key '{}'. Valid keys: clone_dir, default_harness, default_timeout, harnesses.<name>.<property>",
+                "Unknown config key `{}`. Valid keys: clone_dir, default_harness, default_timeout, harnesses.<name>.<property>",
                 key
             );
         }

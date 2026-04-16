@@ -182,7 +182,7 @@ impl Package {
         )
         .context("failed to update package")?;
         if affected == 0 {
-            anyhow::bail!("package with id '{}' not found", self.id);
+            anyhow::bail!("package with id `{}` not found", self.id);
         }
         Ok(())
     }

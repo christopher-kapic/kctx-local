@@ -61,7 +61,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
 
     let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Package '{}' not found. Run `kcl list` to see available packages.",
+            "Package `{}` not found. Run `kcl list` to see available packages.",
             identifier
         )
     })?;
@@ -80,7 +80,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         .get(&harness_name)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Harness '{}' not found in config. Run `kcl init` to detect harnesses or `kcl config set harnesses.{}.command <path>` to add it manually.",
+                "Harness `{}` not found in config. Run `kcl init` to detect harnesses or `kcl config set harnesses.{}.command <path>` to add it manually.",
                 harness_name,
                 harness_name
             )
@@ -105,7 +105,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     let original_branch: Option<String> = if let Some(target_branch) = branch_override {
         if pkg.source_type != SourceType::Git {
             anyhow::bail!(
-                "--branch is only valid for git packages; '{}' is a local package",
+                "--branch is only valid for git packages; `{}` is a local package",
                 pkg.identifier
             );
         }

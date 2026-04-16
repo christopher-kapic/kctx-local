@@ -48,6 +48,7 @@ src/
 - **Shell out to `git`** rather than libgit2 — simpler, respects user's git config/SSH
 - **Exit codes:** 0 = success, 1 = kcl error, 2 = harness error
 - **Agent-friendly output:** `--json` flag on read commands, terse defaults, no color in non-TTY
+- **User-facing message delimiters:** wrap identifiers and literal values in backticks (e.g. ``Package `axum` not found``, ``expected `true` or `false` ``) in error, warning, and status messages. Do not use single quotes for this purpose. Single quotes are reserved for Rust char literals and SQL string literals.
 
 ## Querying Dependencies with kctx
 

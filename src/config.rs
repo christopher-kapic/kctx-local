@@ -90,7 +90,7 @@ impl FromStr for PromptMode {
         match s {
             "arg" => Ok(PromptMode::Arg),
             "stdin" => Ok(PromptMode::Stdin),
-            _ => anyhow::bail!("invalid prompt_mode '{}': expected 'arg' or 'stdin'", s),
+            _ => anyhow::bail!("invalid prompt_mode `{}`: expected `arg` or `stdin`", s),
         }
     }
 }
@@ -342,8 +342,8 @@ mod tests {
     #[test]
     fn prompt_mode_from_str_invalid() {
         let err = "bogus".parse::<PromptMode>().unwrap_err();
-        assert!(err.to_string().contains("invalid prompt_mode 'bogus'"));
-        assert!(err.to_string().contains("'arg' or 'stdin'"));
+        assert!(err.to_string().contains("invalid prompt_mode `bogus`"));
+        assert!(err.to_string().contains("`arg` or `stdin`"));
     }
 
     #[test]

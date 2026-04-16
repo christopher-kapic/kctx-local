@@ -75,7 +75,7 @@ fn validate_identifier(id: &str) -> Result<()> {
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         bail!(
-            "Package identifier '{id}' contains invalid characters. \
+            "Package identifier `{id}` contains invalid characters. \
              Only ASCII letters, digits, hyphens, and underscores are allowed."
         );
     }
@@ -102,7 +102,7 @@ fn cmd_add(
     // Check for duplicate identifier.
     if Package::get_by_identifier(&conn, identifier)?.is_some() {
         bail!(
-            "Package '{identifier}' already exists. Use `kcl packages show {identifier}` to view it or choose a different identifier."
+            "Package `{identifier}` already exists. Use `kcl packages show {identifier}` to view it or choose a different identifier."
         );
     }
 
@@ -132,7 +132,7 @@ fn cmd_add(
             // lets monorepos be registered under multiple identifiers.
             let pkg_dir = std::path::PathBuf::from(&existing.path);
             eprintln!(
-                "reusing existing clone at {} (already registered as '{}')",
+                "reusing existing clone at {} (already registered as `{}`)",
                 existing.path, existing.identifier
             );
             let recorded_branch = match branch {
@@ -212,7 +212,7 @@ fn cmd_add(
     );
 
     pkg.insert(&conn)?;
-    eprintln!("added package '{identifier}'");
+    eprintln!("added package `{identifier}`");
     Ok(())
 }
 
@@ -223,11 +223,11 @@ fn cmd_add(
 fn expand_tilde(path: &str) -> Result<std::path::PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
         let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("cannot expand '~': home directory not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("cannot expand `~`: home directory not found"))?;
         Ok(home.join(rest))
     } else if path == "~" {
         let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("cannot expand '~': home directory not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("cannot expand `~`: home directory not found"))?;
         Ok(home)
     } else {
         Ok(std::path::PathBuf::from(path))
@@ -285,10 +285,10 @@ fn cmd_remove(identifier: &str) -> Result<()> {
                 eprintln!("deleted logs {}", pkg_log_dir.display());
             }
 
-            eprintln!("removed package '{identifier}'");
+            eprintln!("removed package `{identifier}`");
         }
         None => {
-            bail!("Package '{identifier}' not found. Run `kcl list` to see available packages.");
+            bail!("Package `{identifier}` not found. Run `kcl list` to see available packages.");
         }
     }
 
@@ -300,7 +300,7 @@ fn cmd_show(identifier: &str, json: bool) -> Result<()> {
 
     let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Package '{identifier}' not found. Run `kcl list` to see available packages."
+            "Package `{identifier}` not found. Run `kcl list` to see available packages."
         )
     })?;
 
@@ -335,11 +335,11 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
     if let Some(id) = identifier {
         // Pull a single package.
         let pkg = Package::get_by_identifier(&conn, id)?.ok_or_else(|| {
-            anyhow::anyhow!("Package '{id}' not found. Run `kcl list` to see available packages.")
+            anyhow::anyhow!("Package `{id}` not found. Run `kcl list` to see available packages.")
         })?;
 
         if pkg.source_type != SourceType::Git {
-            bail!("Package '{id}' is not a git package. Only git packages can be pulled.");
+            bail!("Package `{id}` is not a git package. Only git packages can be pulled.");
         }
 
         let repo_path = Path::new(&pkg.path);
@@ -384,21 +384,21 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
 
     let mut pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Package '{identifier}' not found. Run `kcl list` to see available packages."
+            "Package `{identifier}` not found. Run `kcl list` to see available packages."
         )
     })?;
 
     match key {
         "auto-pull" => {
             if unset {
-                bail!("cannot unset auto-pull; use 'true' or 'false'");
+                bail!("cannot unset auto-pull; use `true` or `false`");
             }
             let val = value.ok_or_else(|| anyhow::anyhow!("missing value for auto-pull"))?;
             match val {
                 "true" => pkg.auto_pull = true,
                 "false" => pkg.auto_pull = false,
                 other => {
-                    bail!("invalid value for auto-pull: '{other}' (expected 'true' or 'false')")
+                    bail!("invalid value for auto-pull: `{other}` (expected `true` or `false`)")
                 }
             }
         }
@@ -411,7 +411,7 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
                 let known = super::init::known_harness_names();
                 if !known.contains(&val) {
                     bail!(
-                        "Unknown harness '{val}'. Valid harnesses: {}",
+                        "Unknown harness `{val}`. Valid harnesses: {}",
                         known.join(", ")
                     );
                 }
@@ -419,12 +419,12 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
             }
         }
         other => {
-            bail!("Unknown property '{other}'. Valid properties: auto-pull, harness.");
+            bail!("Unknown property `{other}`. Valid properties: auto-pull, harness.");
         }
     }
 
     pkg.update(&conn)?;
-    eprintln!("updated '{identifier}'");
+    eprintln!("updated `{identifier}`");
     Ok(())
 }
 

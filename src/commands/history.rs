@@ -47,7 +47,7 @@ fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Res
 
     let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Package '{}' not found. Run `kcl list` to see available packages.",
+            "Package `{}` not found. Run `kcl list` to see available packages.",
             identifier
         )
     })?;
@@ -63,7 +63,7 @@ fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Res
         println!("{}", output);
     } else {
         if conversations.is_empty() {
-            println!("No conversations found for '{}'.", identifier);
+            println!("No conversations found for `{}`.", identifier);
             return Ok(());
         }
 
@@ -96,7 +96,7 @@ fn run_show(id: &str, json: bool) -> Result<()> {
     let conv = Conversation::get_by_id(&conn, id)?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Conversation '{}' not found. Run `kcl history list <package>` to see available conversations.",
+                "Conversation `{}` not found. Run `kcl history list <package>` to see available conversations.",
                 id
             )
         })?;
