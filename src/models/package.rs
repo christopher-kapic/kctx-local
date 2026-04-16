@@ -155,7 +155,7 @@ impl Package {
              FROM packages ORDER BY identifier",
         )?;
 
-        let rows = stmt.query_map([], |row| Ok(Self::from_row_inner(row)))?;
+        let rows = stmt.query_map([], |row| Ok(Self::from_row(row)))?;
 
         let mut packages = Vec::new();
         for row in rows {
@@ -196,10 +196,6 @@ impl Package {
     }
 
     fn from_row(row: &rusqlite::Row) -> Result<Self> {
-        Self::from_row_inner(row)
-    }
-
-    fn from_row_inner(row: &rusqlite::Row) -> Result<Self> {
         let source_type_str: String = row.get(3)?;
         let auto_pull_int: i32 = row.get(7)?;
         let created_str: String = row.get(9)?;
