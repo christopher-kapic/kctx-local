@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -19,8 +21,12 @@ impl SourceType {
             SourceType::Git => "git",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self> {
+impl FromStr for SourceType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
         match s {
             "local" => Ok(SourceType::Local),
             "git" => Ok(SourceType::Git),
@@ -200,7 +206,7 @@ impl Package {
             id: row.get(0)?,
             identifier: row.get(1)?,
             display_name: row.get(2)?,
-            source_type: SourceType::from_str(&source_type_str)?,
+            source_type: source_type_str.parse()?,
             source_url: row.get(4)?,
             source_branch: row.get(5)?,
             path: row.get(6)?,
@@ -377,6 +383,18 @@ mod tests {
         let found = Package::get_by_source_url(&conn, &url).unwrap().unwrap();
         // Both rows share the same path, so any match gives the right answer.
         assert_eq!(found.path, "/clones/monorepo");
+    }
+
+    #[test]
+    fn source_type_from_str_valid() {
+        assert_eq!("local".parse::<SourceType>().unwrap(), SourceType::Local);
+        assert_eq!("git".parse::<SourceType>().unwrap(), SourceType::Git);
+    }
+
+    #[test]
+    fn source_type_from_str_invalid() {
+        let err = "svn".parse::<SourceType>().unwrap_err();
+        assert!(err.to_string().contains("unknown source type: svn"));
     }
 
     #[test]
