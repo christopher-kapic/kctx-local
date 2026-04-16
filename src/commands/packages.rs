@@ -66,12 +66,30 @@ fn cmd_list(verbose: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn validate_identifier(id: &str) -> Result<()> {
+    if id.is_empty() {
+        bail!("Package identifier must not be empty");
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "Package identifier '{id}' contains invalid characters. \
+             Only ASCII letters, digits, hyphens, and underscores are allowed."
+        );
+    }
+    Ok(())
+}
+
 fn cmd_add(
     identifier: &str,
     path: Option<&str>,
     git: Option<&str>,
     branch: Option<&str>,
 ) -> Result<()> {
+    validate_identifier(identifier)?;
+
     // Validate: must supply --path or --git (or both for tracking existing clone with remote).
     if path.is_none() && git.is_none() {
         bail!(
@@ -549,6 +567,37 @@ mod tests {
         let result = resolve_and_validate_path("~").unwrap();
         let home = ::dirs::home_dir().unwrap();
         assert_eq!(result, home.to_string_lossy());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_traversal() {
+        let result = validate_identifier("../../etc/cron.d");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid characters"));
+    }
+
+    #[test]
+    fn validate_identifier_rejects_empty() {
+        let result = validate_identifier("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn validate_identifier_accepts_valid() {
+        assert!(validate_identifier("my-package").is_ok());
+        assert!(validate_identifier("my_package").is_ok());
+        assert!(validate_identifier("pkg123").is_ok());
+        assert!(validate_identifier("A").is_ok());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_slashes() {
+        assert!(validate_identifier("foo/bar").is_err());
+        assert!(validate_identifier("foo\\bar").is_err());
     }
 
     #[test]
