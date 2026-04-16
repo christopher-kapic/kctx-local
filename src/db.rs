@@ -75,6 +75,19 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    if version < 2 {
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_conversations_pkg_created
+                ON conversations(package_id, created_at DESC);
+
+            DROP INDEX IF EXISTS idx_conversations_package_id;
+
+            PRAGMA user_version = 2;
+            ",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -113,6 +126,33 @@ mod tests {
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
             .unwrap();
         assert_eq!(timeout, 5000);
+    }
+
+    #[test]
+    fn compound_index_on_conversations() {
+        let conn = open_memory().unwrap();
+
+        // The compound index should exist.
+        let has_compound: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_conversations_pkg_created'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_compound, "compound index should exist");
+
+        // The old single-column package_id index should be dropped.
+        let has_old: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_conversations_package_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!has_old, "old single-column package_id index should be dropped");
     }
 
     #[test]
