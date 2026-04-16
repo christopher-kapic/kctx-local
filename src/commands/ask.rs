@@ -68,6 +68,10 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         )
     })?;
 
+    // Drop the connection below once we've finished all DB reads (step 4) so
+    // it isn't held open for the duration of the harness run, which could
+    // otherwise block concurrent writers.
+
     // 2. Load config to resolve harness.
     let config = Config::load_or_default()?;
 
@@ -170,6 +174,11 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
 
     let prompt = harness::build_prompt(&pkg.display_name, &pkg.identifier, question, context_slice);
 
+    // Release the DB connection before the long-running harness invocation so
+    // it doesn't hold WAL locks (or `busy_timeout` slots) while other `kcl`
+    // processes try to write.
+    drop(conn);
+
     // 5. Spawn harness subprocess.
     let started_at = Utc::now();
 
@@ -240,7 +249,8 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         );
     }
 
-    // 7. Insert conversation index row into SQLite.
+    // 7. Insert conversation index row into SQLite. Reopen the connection now
+    //    that the harness has finished so we don't hold it open across the run.
     //    Best-effort: the user has already received the harness response, so a
     //    failure to persist the index row should not fail the command.
     let conversation = Conversation {
@@ -252,8 +262,15 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         log_path: relative_log_path,
         created_at: started_at,
     };
-    if let Err(e) = conversation.insert(&conn) {
-        eprintln!("warning: failed to record conversation in history: {:#}", e);
+    match db::open(&db_path) {
+        Ok(conn) => {
+            if let Err(e) = conversation.insert(&conn) {
+                eprintln!("warning: failed to record conversation in history: {:#}", e);
+            }
+        }
+        Err(e) => {
+            eprintln!("warning: failed to reopen database to record conversation: {:#}", e);
+        }
     }
 
     // 8. Restore the original branch (if we changed it) and exit with the
