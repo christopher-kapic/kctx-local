@@ -70,7 +70,7 @@ pub async fn pull(repo_path: &Path) -> Result<String> {
 }
 
 /// Check if a path is a git repository (has a .git directory or file).
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn is_git_repo(path: &Path) -> bool {
     path.join(".git").exists()
 }
