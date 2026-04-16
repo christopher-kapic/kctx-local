@@ -16,7 +16,7 @@ pub struct HarnessOutput {
     /// The full captured stdout.
     pub stdout: String,
     /// The full captured stderr.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub stderr: String,
 }
 
