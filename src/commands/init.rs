@@ -567,9 +567,9 @@ mod tests {
         assert!(dir.join("kcl.fish").exists());
 
         // Verify files are non-empty
-        assert!(std::fs::read_to_string(dir.join("kcl.bash")).unwrap().len() > 0);
-        assert!(std::fs::read_to_string(dir.join("_kcl")).unwrap().len() > 0);
-        assert!(std::fs::read_to_string(dir.join("kcl.fish")).unwrap().len() > 0);
+        assert!(!std::fs::read_to_string(dir.join("kcl.bash")).unwrap().is_empty());
+        assert!(!std::fs::read_to_string(dir.join("_kcl")).unwrap().is_empty());
+        assert!(!std::fs::read_to_string(dir.join("kcl.fish")).unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -590,9 +590,11 @@ mod tests {
         let default_harness = select_default_harness(&detected, true).unwrap();
         let harness_map = build_harness_map(&detected);
 
-        let mut config = Config::default();
-        config.default_harness = default_harness;
-        config.harnesses = harness_map;
+        let config = Config {
+            default_harness,
+            harnesses: harness_map,
+            ..Default::default()
+        };
         config.save(&config_path).unwrap();
 
         // Create DB
@@ -622,8 +624,10 @@ mod tests {
         let config_path = tmp.join("config.json");
 
         // First "init" — create config with just claude
-        let mut config = Config::default();
-        config.default_harness = "claude".to_string();
+        let mut config = Config {
+            default_harness: "claude".to_string(),
+            ..Default::default()
+        };
         config.harnesses.insert(
             "claude".to_string(),
             HarnessConfig {

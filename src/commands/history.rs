@@ -74,8 +74,8 @@ fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Res
             };
             let ts = conv.created_at.format("%Y-%m-%d %H:%M:%S");
             // Truncate long questions for display.
-            let question_display = if conv.question.len() > 80 {
-                format!("{}...", &conv.question[..77])
+            let question_display = if conv.question.chars().count() > 80 {
+                format!("{}...", conv.question.chars().take(77).collect::<String>())
             } else {
                 conv.question.clone()
             };
@@ -255,6 +255,23 @@ mod tests {
         assert_eq!(parsed["question"], "Test question");
         assert_eq!(parsed["harness"], "copilot");
         assert!(parsed["exit_code"].is_null());
+    }
+
+    #[test]
+    fn truncate_multibyte_question_does_not_panic() {
+        // 90 emoji characters — each is 4 bytes, so byte-indexing at 77 would split a char.
+        let long_question = "🦀".repeat(90);
+        assert!(long_question.len() > 80);
+        assert!(long_question.chars().count() > 80);
+
+        let display = if long_question.chars().count() > 80 {
+            format!("{}...", long_question.chars().take(77).collect::<String>())
+        } else {
+            long_question.clone()
+        };
+
+        assert_eq!(display.chars().count(), 80); // 77 crabs + 3 dots
+        assert!(display.ends_with("..."));
     }
 
     #[test]
