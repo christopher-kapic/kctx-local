@@ -169,6 +169,11 @@ pub fn validate_git_url(url: &str) -> Result<()> {
             "invalid git URL: `{url}`. Expected a URL (https://, git://, ssh://, etc.) or SCP syntax (git@host:path)"
         );
     }
+    if url.starts_with("http://") {
+        eprintln!(
+            "warning: using insecure `http://` for git URL `{url}`; prefer `https://` to avoid MITM tampering"
+        );
+    }
     Ok(())
 }
 
