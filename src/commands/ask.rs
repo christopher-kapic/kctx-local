@@ -43,7 +43,7 @@ pub struct AskArgs<'a> {
     pub context: u32,
 }
 
-pub fn run(args: AskArgs<'_>) -> Result<()> {
+pub fn run(args: AskArgs<'_>) -> Result<i32> {
     let AskArgs {
         identifier,
         question,
@@ -184,7 +184,7 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
         Err(e) => {
             eprintln!("error: {}", e);
             restore_branch(repo_path, original_branch.as_deref());
-            std::process::exit(2);
+            return Ok(2);
         }
     };
 
@@ -240,10 +240,10 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
 
     let exit_code = output.exit_code.unwrap_or(1);
     if exit_code != 0 {
-        std::process::exit(2);
+        return Ok(2);
     }
 
-    Ok(())
+    Ok(0)
 }
 
 /// Try to restore `repo_path` to the previously checked-out branch.
