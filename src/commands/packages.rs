@@ -151,7 +151,7 @@ fn cmd_add(
             // pass --branch we let git pick the remote's default branch
             // instead of hard-coding "main".
             let config = Config::load_or_default()?;
-            let clone_dir = expand_tilde(&config.clone_dir);
+            let clone_dir = expand_tilde(&config.clone_dir)?;
             let pkg_dir = clone_dir.join(identifier);
 
             if pkg_dir.exists() {
@@ -204,22 +204,26 @@ fn cmd_add(
 }
 
 /// Expand a leading `~` to the user's home directory.
-fn expand_tilde(path: &str) -> std::path::PathBuf {
+///
+/// Returns an error if the path starts with `~` but the home directory
+/// cannot be determined (e.g. in minimal container environments).
+fn expand_tilde(path: &str) -> Result<std::path::PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = ::dirs::home_dir() {
-            return home.join(rest);
-        }
-    } else if path == "~"
-        && let Some(home) = ::dirs::home_dir()
-    {
-        return home;
+        let home = ::dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot expand '~': home directory not found"))?;
+        Ok(home.join(rest))
+    } else if path == "~" {
+        let home = ::dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot expand '~': home directory not found"))?;
+        Ok(home)
+    } else {
+        Ok(std::path::PathBuf::from(path))
     }
-    std::path::PathBuf::from(path)
 }
 
 /// Resolve a path to absolute form and validate it exists as a directory.
 fn resolve_and_validate_path(p: &str) -> Result<String> {
-    let expanded = expand_tilde(p);
+    let expanded = expand_tilde(p)?;
     let abs = if expanded.is_absolute() {
         expanded
     } else {
@@ -253,7 +257,7 @@ fn cmd_remove(identifier: &str) -> Result<()> {
             // rather than pkg.path so we never delete a user-managed directory
             // that was registered via --path.
             let config = Config::load_or_default()?;
-            let clone_dir = expand_tilde(&config.clone_dir);
+            let clone_dir = expand_tilde(&config.clone_dir)?;
             let pkg_clone_dir = clone_dir.join(identifier);
             if pkg_clone_dir.is_dir() {
                 std::fs::remove_dir_all(&pkg_clone_dir)?;
@@ -677,6 +681,26 @@ mod tests {
         if nonexistent.is_dir() {
             std::fs::remove_dir_all(&nonexistent).unwrap();
         }
+    }
+
+    #[test]
+    fn expand_tilde_returns_ok_for_non_tilde_path() {
+        let result = expand_tilde("/absolute/path").unwrap();
+        assert_eq!(result, std::path::PathBuf::from("/absolute/path"));
+    }
+
+    #[test]
+    fn expand_tilde_expands_home_prefix() {
+        let result = expand_tilde("~/projects").unwrap();
+        let home = ::dirs::home_dir().unwrap();
+        assert_eq!(result, home.join("projects"));
+    }
+
+    #[test]
+    fn expand_tilde_expands_bare_tilde() {
+        let result = expand_tilde("~").unwrap();
+        let home = ::dirs::home_dir().unwrap();
+        assert_eq!(result, home);
     }
 
     #[test]
