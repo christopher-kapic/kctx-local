@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -201,7 +201,8 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
 
     let log_dir = paths::log_dir()?;
     let pkg_log_dir = log_dir.join(&pkg.identifier);
-    std::fs::create_dir_all(&pkg_log_dir)?;
+    std::fs::create_dir_all(&pkg_log_dir)
+        .with_context(|| format!("failed to create log directory {}", pkg_log_dir.display()))?;
 
     // Only record the model in the log if the harness actually accepted it.
     // (model_args being non-empty is the signal that the model was forwarded.)
@@ -224,7 +225,8 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
 
     let log_path = pkg_log_dir.join(&log_filename);
     let log_json = serde_json::to_string_pretty(&log)?;
-    std::fs::write(&log_path, &log_json)?;
+    std::fs::write(&log_path, &log_json)
+        .with_context(|| format!("failed to write conversation log to {}", log_path.display()))?;
 
     // 7. Insert conversation index row into SQLite.
     let conversation = Conversation {
