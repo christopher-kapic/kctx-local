@@ -108,13 +108,27 @@ pub fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
 
     // Fetch so we can resolve remote-only branches. Failures here are not
     // fatal — the user may be offline and the branch may already be local.
-    let _ = Command::new("git")
+    let fetch_err = match Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .arg("fetch")
         .arg("origin")
         .arg(branch)
-        .output();
+        .output()
+    {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let msg = format!("git fetch origin {branch} failed: {stderr}");
+            eprintln!("warning: {msg}");
+            Some(msg)
+        }
+        Err(e) => {
+            let msg = format!("failed to execute git fetch: {e}");
+            eprintln!("warning: {msg}");
+            Some(msg)
+        }
+    };
 
     let output = Command::new("git")
         .arg("-C")
@@ -126,7 +140,11 @@ pub fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git checkout {} failed: {}", branch, stderr.trim());
+        let mut msg = format!("git checkout {} failed: {}", branch, stderr.trim());
+        if let Some(fetch_msg) = fetch_err {
+            msg.push_str(&format!(" (prior fetch also failed: {})", fetch_msg));
+        }
+        bail!("{msg}");
     }
 
     Ok(())
@@ -230,6 +248,41 @@ mod tests {
     #[test]
     fn is_git_repo_false_for_regular_dir() {
         assert!(!is_git_repo(Path::new("/tmp")));
+    }
+
+    #[test]
+    fn checkout_bogus_remote_surfaces_fetch_error() {
+        let tmp = std::env::temp_dir().join("kcl-test-git-checkout-fetch-err");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Init a repo with one commit so checkout has something to work with.
+        Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .current_dir(&tmp)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(&tmp)
+            .output()
+            .unwrap();
+        // Point origin at a bogus URL so fetch fails.
+        Command::new("git")
+            .args(["remote", "add", "origin", "https://example.invalid/no-repo.git"])
+            .current_dir(&tmp)
+            .output()
+            .unwrap();
+
+        let result = checkout(&tmp, "nonexistent-branch");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("prior fetch also failed"),
+            "error should mention failed fetch: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
