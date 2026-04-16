@@ -2,10 +2,6 @@
 
 A Rust CLI that gives agents and humans instant Q&A access to any codebase on the local machine. Clones repos to disk and invokes coding harnesses (Claude Code, opencode, copilot, etc.) in non-interactive mode to answer queries. No server, no API keys for kcl itself.
 
-## Design Spec
-
-The full design spec is in `kcl-plan.md` at the project root. Read it before making changes.
-
 ## Tech Stack
 
 - **Language:** Rust
