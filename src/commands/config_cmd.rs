@@ -145,6 +145,8 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
             // Support dot-notation for harness properties:
             //   harnesses.<name>.command
             //   harnesses.<name>.prompt_mode
+            //   harnesses.<name>.args
+            //   harnesses.<name>.default_model
             let parts: Vec<&str> = key.splitn(4, '.').collect();
             if parts.len() < 3 {
                 bail!(
@@ -168,10 +170,22 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
 
             match property {
                 "command" => {
+                    if value.is_empty() {
+                        bail!("harness `command` must not be empty");
+                    }
                     harness.command = value.to_string();
                 }
                 "prompt_mode" => {
                     harness.prompt_mode = value.parse()?;
+                }
+                "args" => {
+                    harness.args = if value.is_empty() {
+                        Vec::new()
+                    } else {
+                        shlex::split(value).with_context(|| {
+                            format!("failed to parse args value `{}`", value)
+                        })?
+                    };
                 }
                 "default_model" => {
                     // Empty string clears the default model.
@@ -183,10 +197,18 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
                 }
                 _ => {
                     bail!(
-                        "Unknown harness property `{}`. Valid: command, prompt_mode, default_model",
+                        "Unknown harness property `{}`. Valid: command, prompt_mode, args, default_model",
                         property
                     );
                 }
+            }
+
+            if harness.command.is_empty() {
+                bail!(
+                    "harness `{}` has no command set. Set harnesses.{}.command first",
+                    harness_name,
+                    harness_name
+                );
             }
         }
         _ => {
