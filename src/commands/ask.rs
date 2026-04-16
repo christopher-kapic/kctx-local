@@ -130,13 +130,15 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         None
     };
 
-    // 3b. Auto-pull if applicable. We always pull when --branch is supplied
-    //     (so the user gets the latest of that branch), regardless of
-    //     --no-pull or the package's auto_pull setting.
-    let should_pull = if branch_override.is_some() {
+    // 3b. Auto-pull if applicable. --no-pull always wins. When --branch is
+    //     supplied we default to pulling (so the user gets the latest of
+    //     that branch), but --no-pull can suppress it.
+    let should_pull = if no_pull {
+        false
+    } else if branch_override.is_some() {
         true
     } else {
-        !no_pull && pkg.auto_pull && pkg.source_type == SourceType::Git
+        pkg.auto_pull && pkg.source_type == SourceType::Git
     };
     if should_pull && pkg.source_type == SourceType::Git {
         eprintln!("pulling {} ...", pkg.identifier);

@@ -42,7 +42,7 @@ pub enum Command {
 
         /// Check out this branch before answering, then restore the
         /// previously checked-out branch when finished. Pulls the branch
-        /// before running the harness regardless of --no-pull.
+        /// before running the harness unless --no-pull is set.
         #[arg(long)]
         branch: Option<String>,
 
