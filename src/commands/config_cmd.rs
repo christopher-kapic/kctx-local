@@ -147,15 +147,16 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
             //   harnesses.<name>.prompt_mode
             //   harnesses.<name>.args
             //   harnesses.<name>.default_model
-            let parts: Vec<&str> = key.splitn(4, '.').collect();
-            if parts.len() < 3 {
-                bail!(
+            // The <name> may itself contain dots, so split off the final
+            // segment as the property and treat everything before it as the name.
+            let suffix = key.strip_prefix("harnesses.").unwrap();
+            let (harness_name, property) = match suffix.rsplit_once('.') {
+                Some((name, prop)) if !name.is_empty() && !prop.is_empty() => (name, prop),
+                _ => bail!(
                     "Invalid harness key `{}`. Expected harnesses.<name>.<property>",
                     key
-                );
-            }
-            let harness_name = parts[1];
-            let property = parts[2];
+                ),
+            };
 
             let harness = config
                 .harnesses
