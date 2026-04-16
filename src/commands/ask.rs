@@ -43,7 +43,7 @@ pub struct AskArgs<'a> {
     pub context: u32,
 }
 
-pub fn run(args: AskArgs<'_>) -> Result<i32> {
+pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     let AskArgs {
         identifier,
         question,
@@ -164,17 +164,16 @@ pub fn run(args: AskArgs<'_>) -> Result<i32> {
     // 5. Spawn harness subprocess.
     let started_at = Utc::now();
 
-    let rt = tokio::runtime::Runtime::new()?;
     let cwd = std::path::PathBuf::from(&pkg.path);
 
-    let harness_result = rt.block_on(harness::run_harness(
+    let harness_result = harness::run_harness(
         &harness_config,
         &prompt,
         &cwd,
         timeout,
         true, // stream stdout to caller
         effective_model.as_deref(),
-    ));
+    ).await;
 
     let finished_at = Utc::now();
 

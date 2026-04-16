@@ -11,7 +11,8 @@ use clap::Parser;
 
 use cli::{Cli, Command};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     let result = match &cli.command {
@@ -33,7 +34,7 @@ fn main() {
             no_pull: *no_pull,
             branch_override: branch.as_deref(),
             context: *context,
-        }),
+        }).await,
 
         Command::List { verbose, json } => {
             let cmd = cli::PackagesCommand::List {
