@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -96,6 +97,13 @@ fn cmd_edit() -> Result<()> {
     if !path.exists() {
         bail!(
             "No config file found at {}. Run `kcl init` to create one.",
+            path.display()
+        );
+    }
+
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        bail!(
+            "`kcl config edit` requires an interactive terminal. Edit {} directly or use `kcl config set`.",
             path.display()
         );
     }
