@@ -93,6 +93,24 @@ pub fn build_args(harness: &HarnessConfig, prompt: &str, model: Option<&str>) ->
     args
 }
 
+/// Wait for SIGINT or SIGTERM. On non-Unix platforms, returns a future that
+/// never resolves (signals are handled by the OS default behavior).
+#[cfg(unix)]
+async fn setup_signal_handler() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+    tokio::select! {
+        _ = sigint.recv() => {}
+        _ = sigterm.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn setup_signal_handler() {
+    std::future::pending::<()>().await;
+}
+
 /// Kill a harness subprocess and all processes in its group, then reap.
 ///
 /// On Unix, sends SIGKILL to the entire process group (the child was spawned
@@ -177,6 +195,9 @@ pub async fn run_harness(
     let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
     tokio::pin!(timeout);
 
+    let signal_fut = setup_signal_handler();
+    tokio::pin!(signal_fut);
+
     // Read stdout/stderr concurrently, with timeout
     loop {
         tokio::select! {
@@ -238,6 +259,10 @@ pub async fn run_harness(
                     "harness timed out after {} seconds",
                     timeout_secs
                 );
+            }
+            _ = &mut signal_fut => {
+                kill_and_reap(&mut child).await;
+                bail!("interrupted by signal");
             }
         }
     }
