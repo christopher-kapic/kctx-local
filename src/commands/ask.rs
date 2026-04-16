@@ -88,6 +88,7 @@ pub fn run(args: AskArgs<'_>) -> Result<i32> {
         .clone();
 
     let timeout = timeout_override.unwrap_or(config.default_timeout);
+    crate::config::validate_timeout(timeout)?;
 
     // Resolve the effective model: CLI flag wins, otherwise fall back to the
     // harness's configured `default_model` (if any). The resolved value is

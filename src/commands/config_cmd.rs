@@ -71,6 +71,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
             let timeout: u64 = value
                 .parse()
                 .with_context(|| format!("invalid timeout value '{}': expected integer", value))?;
+            crate::config::validate_timeout(timeout)?;
             config.default_timeout = timeout;
         }
         _ if key.starts_with("harnesses.") => {
@@ -209,6 +210,24 @@ mod tests {
 
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.default_harness, "opencode");
+    }
+
+    #[test]
+    fn set_timeout_rejects_zero() {
+        let (path, _cleanup) = setup_test_config();
+
+        let mut config = Config::load(&path).unwrap();
+        config.default_timeout = 0;
+        // Bypass save validation to test cmd_set path
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, json).unwrap();
+
+        // Simulate what cmd_set does: parse + validate
+        let value = "0";
+        let timeout: u64 = value.parse().unwrap();
+        let result = crate::config::validate_timeout(timeout);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("at least 1"));
     }
 
     #[test]

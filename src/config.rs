@@ -64,8 +64,21 @@ pub enum PromptMode {
     Stdin,
 }
 
+pub const MIN_TIMEOUT: u64 = 1;
+
 fn default_timeout() -> u64 {
     120
+}
+
+pub fn validate_timeout(seconds: u64) -> Result<()> {
+    if seconds < MIN_TIMEOUT {
+        anyhow::bail!(
+            "timeout must be at least {} second(s), got {}",
+            MIN_TIMEOUT,
+            seconds
+        );
+    }
+    Ok(())
 }
 
 fn default_prompt_mode() -> PromptMode {
@@ -91,6 +104,7 @@ impl Config {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let config: Config = serde_json::from_str(&contents)
             .with_context(|| format!("parsing {}", path.display()))?;
+        validate_timeout(config.default_timeout)?;
         Ok(config)
     }
 
@@ -231,6 +245,39 @@ mod tests {
         let json = serde_json::to_string_pretty(&config).unwrap();
         let deserialized: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn validate_timeout_rejects_zero() {
+        let err = validate_timeout(0).unwrap_err();
+        assert!(err.to_string().contains("at least 1"));
+    }
+
+    #[test]
+    fn validate_timeout_accepts_minimum() {
+        validate_timeout(1).unwrap();
+    }
+
+    #[test]
+    fn validate_timeout_accepts_large_value() {
+        validate_timeout(3600).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_zero_timeout() {
+        let dir = std::env::temp_dir().join("kcl-test-zero-timeout");
+        let path = dir.join("config.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"clone_dir":"/tmp","default_harness":"claude","default_timeout":0}"#,
+        )
+        .unwrap();
+
+        let err = Config::load(&path).unwrap_err();
+        assert!(err.to_string().contains("at least 1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
