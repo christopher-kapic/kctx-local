@@ -213,13 +213,17 @@ pub async fn run_harness(
                         stdout_buf.push_str(&line);
                     }
                     Ok(None) => {
-                        // stdout closed — drain remaining stderr then wait for exit
-                        while let Ok(Some(line)) = stderr_reader.next_line().await {
-                            if !stderr_buf.is_empty() {
-                                stderr_buf.push('\n');
+                        // stdout closed — drain remaining stderr with a timeout
+                        // to avoid hanging if the pipe stays open indefinitely
+                        let drain = async {
+                            while let Ok(Some(line)) = stderr_reader.next_line().await {
+                                if !stderr_buf.is_empty() {
+                                    stderr_buf.push('\n');
+                                }
+                                stderr_buf.push_str(&line);
                             }
-                            stderr_buf.push_str(&line);
-                        }
+                        };
+                        let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
                         break;
                     }
                     Err(e) => {
@@ -236,16 +240,20 @@ pub async fn run_harness(
                         stderr_buf.push_str(&line);
                     }
                     Ok(None) => {
-                        // stderr closed — drain remaining stdout then wait for exit
-                        while let Ok(Some(line)) = stdout_reader.next_line().await {
-                            if stream_stdout {
-                                println!("{}", line);
+                        // stderr closed — drain remaining stdout with a timeout
+                        // to avoid hanging if the pipe stays open indefinitely
+                        let drain = async {
+                            while let Ok(Some(line)) = stdout_reader.next_line().await {
+                                if stream_stdout {
+                                    println!("{}", line);
+                                }
+                                if !stdout_buf.is_empty() {
+                                    stdout_buf.push('\n');
+                                }
+                                stdout_buf.push_str(&line);
                             }
-                            if !stdout_buf.is_empty() {
-                                stdout_buf.push('\n');
-                            }
-                            stdout_buf.push_str(&line);
-                        }
+                        };
+                        let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
                         break;
                     }
                     Err(e) => {
