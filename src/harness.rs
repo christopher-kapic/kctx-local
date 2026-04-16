@@ -102,11 +102,36 @@ pub fn build_args(harness: &HarnessConfig, prompt: &str, model: Option<&str>) ->
 #[cfg(unix)]
 async fn setup_signal_handler() {
     use tokio::signal::unix::{SignalKind, signal};
-    let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
-    let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
-    tokio::select! {
-        _ = sigint.recv() => {}
-        _ = sigterm.recv() => {}
+    let sigint = match signal(SignalKind::interrupt()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("warning: failed to register SIGINT handler: {}", e);
+            None
+        }
+    };
+    let sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("warning: failed to register SIGTERM handler: {}", e);
+            None
+        }
+    };
+    match (sigint, sigterm) {
+        (Some(mut sigint), Some(mut sigterm)) => {
+            tokio::select! {
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        (Some(mut sigint), None) => {
+            sigint.recv().await;
+        }
+        (None, Some(mut sigterm)) => {
+            sigterm.recv().await;
+        }
+        (None, None) => {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
