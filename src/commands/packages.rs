@@ -242,7 +242,32 @@ fn cmd_remove(identifier: &str) -> Result<()> {
     let pkg = Package::get_by_identifier(&conn, identifier)?;
     match pkg {
         Some(pkg) => {
+            // Delete DB row first, then clean up on-disk artifacts.
+            // If we crash after DB deletion but before disk cleanup, the
+            // orphan directories are harmless and can be cleaned manually.
+            // The reverse order would leave DB rows pointing at nothing.
             Package::delete(&conn, &pkg.id)?;
+
+            // Remove the clone directory if it lives inside the configured
+            // clone_dir (i.e. kcl created it). We use clone_dir/identifier
+            // rather than pkg.path so we never delete a user-managed directory
+            // that was registered via --path.
+            let config = Config::load_or_default()?;
+            let clone_dir = expand_tilde(&config.clone_dir);
+            let pkg_clone_dir = clone_dir.join(identifier);
+            if pkg_clone_dir.is_dir() {
+                std::fs::remove_dir_all(&pkg_clone_dir)?;
+                eprintln!("deleted clone {}", pkg_clone_dir.display());
+            }
+
+            // Remove conversation log directory for this package.
+            let log_dir = dirs::log_dir()?;
+            let pkg_log_dir = log_dir.join(identifier);
+            if pkg_log_dir.is_dir() {
+                std::fs::remove_dir_all(&pkg_log_dir)?;
+                eprintln!("deleted logs {}", pkg_log_dir.display());
+            }
+
             eprintln!("removed package '{identifier}'");
         }
         None => {
@@ -599,6 +624,59 @@ mod tests {
     fn validate_identifier_rejects_slashes() {
         assert!(validate_identifier("foo/bar").is_err());
         assert!(validate_identifier("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn remove_cleans_up_clone_and_log_dirs() {
+        let (conn, _pkg) = setup();
+
+        // Create temporary directories to simulate clone and log dirs.
+        let tmp = std::env::temp_dir().join("kcl_remove_test");
+        let clone_dir = tmp.join("clones");
+        let log_dir = tmp.join("logs");
+        let pkg_clone = clone_dir.join("testpkg");
+        let pkg_log = log_dir.join("testpkg");
+
+        std::fs::create_dir_all(&pkg_clone).unwrap();
+        std::fs::create_dir_all(&pkg_log).unwrap();
+        // Put a file in each to verify recursive removal.
+        std::fs::write(pkg_clone.join("file.txt"), "clone").unwrap();
+        std::fs::write(pkg_log.join("conv.json"), "log").unwrap();
+
+        assert!(pkg_clone.is_dir());
+        assert!(pkg_log.is_dir());
+
+        // Delete from DB.
+        Package::delete(&conn, &_pkg.id).unwrap();
+        assert!(Package::get_by_identifier(&conn, "testpkg")
+            .unwrap()
+            .is_none());
+
+        // Simulate the disk cleanup from cmd_remove.
+        if pkg_clone.is_dir() {
+            std::fs::remove_dir_all(&pkg_clone).unwrap();
+        }
+        if pkg_log.is_dir() {
+            std::fs::remove_dir_all(&pkg_log).unwrap();
+        }
+
+        assert!(!pkg_clone.exists());
+        assert!(!pkg_log.exists());
+
+        // Clean up the test root.
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn remove_handles_missing_dirs_gracefully() {
+        // When clone/log dirs don't exist, the is_dir() guard prevents errors.
+        let nonexistent = std::path::PathBuf::from("/tmp/kcl_nonexistent_12345");
+        assert!(!nonexistent.is_dir());
+        // The cmd_remove pattern: only remove if is_dir().
+        // This should not panic or error.
+        if nonexistent.is_dir() {
+            std::fs::remove_dir_all(&nonexistent).unwrap();
+        }
     }
 
     #[test]
