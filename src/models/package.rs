@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -19,8 +21,12 @@ impl SourceType {
             SourceType::Git => "git",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self> {
+impl FromStr for SourceType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
         match s {
             "local" => Ok(SourceType::Local),
             "git" => Ok(SourceType::Git),
@@ -149,7 +155,7 @@ impl Package {
              FROM packages ORDER BY identifier",
         )?;
 
-        let rows = stmt.query_map([], |row| Ok(Self::from_row_inner(row)))?;
+        let rows = stmt.query_map([], |row| Ok(Self::from_row(row)))?;
 
         let mut packages = Vec::new();
         for row in rows {
@@ -160,7 +166,7 @@ impl Package {
 
     /// Update a package's mutable fields.
     pub fn update(&self, conn: &Connection) -> Result<()> {
-        conn.execute(
+        let affected = conn.execute(
             "UPDATE packages SET display_name = ?1, source_url = ?2, source_branch = ?3, path = ?4, auto_pull = ?5, harness = ?6, updated_at = ?7
              WHERE id = ?8",
             params![
@@ -175,6 +181,9 @@ impl Package {
             ],
         )
         .context("failed to update package")?;
+        if affected == 0 {
+            anyhow::bail!("package with id `{}` not found", self.id);
+        }
         Ok(())
     }
 
@@ -187,10 +196,6 @@ impl Package {
     }
 
     fn from_row(row: &rusqlite::Row) -> Result<Self> {
-        Self::from_row_inner(row)
-    }
-
-    fn from_row_inner(row: &rusqlite::Row) -> Result<Self> {
         let source_type_str: String = row.get(3)?;
         let auto_pull_int: i32 = row.get(7)?;
         let created_str: String = row.get(9)?;
@@ -200,7 +205,7 @@ impl Package {
             id: row.get(0)?,
             identifier: row.get(1)?,
             display_name: row.get(2)?,
-            source_type: SourceType::from_str(&source_type_str)?,
+            source_type: source_type_str.parse()?,
             source_url: row.get(4)?,
             source_branch: row.get(5)?,
             path: row.get(6)?,
@@ -380,6 +385,18 @@ mod tests {
     }
 
     #[test]
+    fn source_type_from_str_valid() {
+        assert_eq!("local".parse::<SourceType>().unwrap(), SourceType::Local);
+        assert_eq!("git".parse::<SourceType>().unwrap(), SourceType::Git);
+    }
+
+    #[test]
+    fn source_type_from_str_invalid() {
+        let err = "svn".parse::<SourceType>().unwrap_err();
+        assert!(err.to_string().contains("unknown source type: svn"));
+    }
+
+    #[test]
     fn update_package() {
         let conn = db::open_memory().unwrap();
         let mut pkg = test_package("updatable");
@@ -397,5 +414,18 @@ mod tests {
         assert_eq!(retrieved.display_name, "Updated Name");
         assert!(retrieved.auto_pull);
         assert_eq!(retrieved.harness.as_deref(), Some("copilot"));
+    }
+
+    #[test]
+    fn update_missing_package_errors() {
+        let conn = db::open_memory().unwrap();
+        let mut pkg = test_package("ghost");
+        // Don't insert — just try to update a non-existent row.
+        pkg.id = "nonexistent-id".to_string();
+        let err = pkg.update(&conn).unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "expected 'not found' error, got: {err}"
+        );
     }
 }

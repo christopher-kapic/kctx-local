@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::CommandFactory;
@@ -76,19 +76,18 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
             HarnessConfig {
                 command: "codex".to_string(),
                 // codex's non-interactive entrypoint is the `exec`
-                // subcommand. Prompt is a positional arg. The extra
-                // flags are the recommended headless defaults:
+                // subcommand. Prompt is a positional arg.
                 // `--skip-git-repo-check` allows running outside a git
-                // repo, `--ephemeral` avoids persisting session files,
-                // and `approval_policy=never` disables approval prompts
-                // so codex won't block on tool use.
+                // repo; `--ephemeral` avoids persisting session files.
+                // `codex exec` already defaults to `AskForApproval::Never`
+                // in headless mode (see codex-rs/exec/src/lib.rs ~L370 and
+                // codex-rs/exec/src/cli.rs), so no approval-policy override
+                // is needed.
                 args: vec![
                     "exec".to_string(),
                     "{prompt}".to_string(),
                     "--skip-git-repo-check".to_string(),
                     "--ephemeral".to_string(),
-                    "-c".to_string(),
-                    "approval_policy=never".to_string(),
                 ],
                 prompt_mode: PromptMode::Arg,
                 // codex accepts `-m <model>` / `--model <model>`.
@@ -120,14 +119,18 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
     ]
 }
 
-/// The canonical list of harness names kcl knows how to configure.
-/// Keep in sync with [`known_harnesses`].
-const KNOWN_HARNESS_NAMES: &[&str] = &["claude", "copilot", "pi", "opencode", "codex", "goose"];
+/// Returns the canonical list of harness names, derived from [`known_harnesses`].
+pub(crate) fn known_harness_names() -> Vec<&'static str> {
+    known_harnesses()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
 
 /// Scan PATH for known harnesses, returning names of those found.
 fn detect_harnesses() -> Vec<String> {
-    KNOWN_HARNESS_NAMES
-        .iter()
+    known_harness_names()
+        .into_iter()
         .filter(|name| which::which(name).is_ok())
         .map(|name| name.to_string())
         .collect()
@@ -138,9 +141,9 @@ fn detect_harnesses() -> Vec<String> {
 fn select_default_harness(detected: &[String], non_interactive: bool) -> Result<String> {
     match detected.len() {
         0 => {
-            eprintln!("Warning: no known harnesses found in PATH. Defaulting to 'claude'.");
+            eprintln!("Warning: no known harnesses found in PATH. Defaulting to `claude`.");
             eprintln!(
-                "Install a supported harness or configure one manually with 'kcl config set'."
+                "Install a supported harness or configure one manually with `kcl config set`."
             );
             Ok("claude".to_string())
         }
@@ -152,7 +155,7 @@ fn select_default_harness(detected: &[String], non_interactive: bool) -> Result<
             if non_interactive {
                 // Pick first detected
                 eprintln!(
-                    "Multiple harnesses found: {}. Auto-selecting '{}'.",
+                    "Multiple harnesses found: {}. Auto-selecting `{}`.",
                     detected.join(", "),
                     detected[0]
                 );
@@ -258,7 +261,7 @@ fn merge_config(
 }
 
 /// Generate shell completion files for bash, zsh, and fish.
-fn generate_completions(completions_dir: &PathBuf) -> Result<()> {
+fn generate_completions(completions_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(completions_dir).with_context(|| {
         format!(
             "creating completions directory: {}",
@@ -297,7 +300,7 @@ pub fn run(non_interactive: bool) -> Result<()> {
     let harness_map = build_harness_map(&detected);
 
     // 5. Load or create config, merging if it already exists
-    let config_path = crate::dirs::config_file()?;
+    let config_path = crate::paths::config_file()?;
     let config_existed = config_path.exists();
 
     let mut config = if config_existed {
@@ -325,11 +328,11 @@ pub fn run(non_interactive: bool) -> Result<()> {
     config.save(&config_path)?;
 
     // 6. Create database with schema
-    let db_path = crate::dirs::db_file()?;
+    let db_path = crate::paths::db_file()?;
     let _conn = crate::db::open(&db_path)?;
 
     // 7. Generate shell completions
-    let completions_dir = crate::dirs::config_dir()?.join("completions");
+    let completions_dir = crate::paths::config_dir()?.join("completions");
     generate_completions(&completions_dir)?;
 
     // 8. Print summary
@@ -356,7 +359,8 @@ pub fn run(non_interactive: bool) -> Result<()> {
         }
     }
 
-    let not_found: Vec<&str> = KNOWN_HARNESS_NAMES
+    let all_names = known_harness_names();
+    let not_found: Vec<&str> = all_names
         .iter()
         .filter(|n| !detected.contains(&n.to_string()))
         .copied()
@@ -399,7 +403,9 @@ mod tests {
         assert!(codex.args.contains(&"{prompt}".to_string()));
         assert!(codex.args.contains(&"--skip-git-repo-check".to_string()));
         assert!(codex.args.contains(&"--ephemeral".to_string()));
-        assert!(codex.args.contains(&"approval_policy=never".to_string()));
+        // `codex exec` already defaults to AskForApproval::Never in headless
+        // mode, so we deliberately do NOT pass `-c approval_policy=...`.
+        assert!(!codex.args.contains(&"approval_policy=never".to_string()));
         assert!(!codex.args.contains(&"--full-auto".to_string()));
     }
 
@@ -567,9 +573,21 @@ mod tests {
         assert!(dir.join("kcl.fish").exists());
 
         // Verify files are non-empty
-        assert!(std::fs::read_to_string(dir.join("kcl.bash")).unwrap().len() > 0);
-        assert!(std::fs::read_to_string(dir.join("_kcl")).unwrap().len() > 0);
-        assert!(std::fs::read_to_string(dir.join("kcl.fish")).unwrap().len() > 0);
+        assert!(
+            !std::fs::read_to_string(dir.join("kcl.bash"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !std::fs::read_to_string(dir.join("_kcl"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !std::fs::read_to_string(dir.join("kcl.fish"))
+                .unwrap()
+                .is_empty()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -590,9 +608,11 @@ mod tests {
         let default_harness = select_default_harness(&detected, true).unwrap();
         let harness_map = build_harness_map(&detected);
 
-        let mut config = Config::default();
-        config.default_harness = default_harness;
-        config.harnesses = harness_map;
+        let config = Config {
+            default_harness,
+            harnesses: harness_map,
+            ..Default::default()
+        };
         config.save(&config_path).unwrap();
 
         // Create DB
@@ -622,8 +642,10 @@ mod tests {
         let config_path = tmp.join("config.json");
 
         // First "init" — create config with just claude
-        let mut config = Config::default();
-        config.default_harness = "claude".to_string();
+        let mut config = Config {
+            default_harness: "claude".to_string(),
+            ..Default::default()
+        };
         config.harnesses.insert(
             "claude".to_string(),
             HarnessConfig {

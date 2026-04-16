@@ -48,6 +48,7 @@ src/
 - **Shell out to `git`** rather than libgit2 — simpler, respects user's git config/SSH
 - **Exit codes:** 0 = success, 1 = kcl error, 2 = harness error
 - **Agent-friendly output:** `--json` flag on read commands, terse defaults, no color in non-TTY
+- **User-facing message delimiters:** wrap identifiers and literal values in backticks (e.g. ``Package `axum` not found``, ``expected `true` or `false` ``) in error, warning, and status messages. Do not use single quotes for this purpose. Single quotes are reserved for Rust char literals and SQL string literals.
 
 ## Querying Dependencies with kctx
 
@@ -81,6 +82,10 @@ Releases are fully automated via `.github/workflows/release.yml`:
 3. The workflow detects the version change, creates a GitHub Release, and uploads cross-compiled binaries for `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu` (each with a `.sha256` checksum).
 
 `scripts/install.sh` is the user-facing `curl | bash` installer. If you change binary name, target list, or release asset naming, update both the workflow and the script together.
+
+## Known Dependency Duplications
+
+- **`getrandom` 0.2 and 0.4** both appear in `Cargo.lock`. `getrandom 0.2` is pulled in transitively by `dirs` → `dirs-sys` → `redox_users`; `getrandom 0.4` is pulled in by `uuid`. All intermediate crates are at their latest stable releases, so this cannot be resolved without forking `dirs` or replacing it with another platform-dir crate. Accepted as-is.
 
 ## Related Projects
 

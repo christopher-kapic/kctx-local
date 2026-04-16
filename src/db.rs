@@ -13,11 +13,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)
         .with_context(|| format!("could not open database: {}", path.display()))?;
 
-    // Enable WAL mode for better concurrent read performance.
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    // Enable foreign key enforcement (off by default in SQLite).
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-
+    apply_pragmas(&conn)?;
     migrate(&conn)?;
 
     Ok(conn)
@@ -27,9 +23,22 @@ pub fn open(path: &Path) -> Result<Connection> {
 #[cfg(test)]
 pub fn open_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory().context("could not open in-memory database")?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
+    apply_pragmas(&conn)?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// Apply connection-wide pragmas. SQLite silently ignores `journal_mode=WAL`
+/// for `:memory:` databases (it stays in "memory" mode), so this helper is
+/// safe to call from both disk-backed and in-memory `open*` paths.
+fn apply_pragmas(conn: &Connection) -> Result<()> {
+    // Enable WAL mode for better concurrent read performance (no-op for :memory:).
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    // Enable foreign key enforcement (off by default in SQLite).
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Block up to 5s on SQLITE_BUSY instead of failing immediately.
+    conn.pragma_update(None, "busy_timeout", 5000)?;
+    Ok(())
 }
 
 /// Run all schema migrations. Uses a simple user_version check.
@@ -73,6 +82,19 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    if version < 2 {
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_conversations_pkg_created
+                ON conversations(package_id, created_at DESC);
+
+            DROP INDEX IF EXISTS idx_conversations_package_id;
+
+            PRAGMA user_version = 2;
+            ",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -102,6 +124,45 @@ mod tests {
         let conn = open_memory().unwrap();
         // Running migrate again should not fail.
         migrate(&conn).unwrap();
+    }
+
+    #[test]
+    fn busy_timeout_set() {
+        let conn = open_memory().unwrap();
+        let timeout: i32 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000);
+    }
+
+    #[test]
+    fn compound_index_on_conversations() {
+        let conn = open_memory().unwrap();
+
+        // The compound index should exist.
+        let has_compound: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_conversations_pkg_created'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_compound, "compound index should exist");
+
+        // The old single-column package_id index should be dropped.
+        let has_old: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_conversations_package_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !has_old,
+            "old single-column package_id index should be dropped"
+        );
     }
 
     #[test]

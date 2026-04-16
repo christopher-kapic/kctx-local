@@ -93,6 +93,48 @@ pub fn build_args(harness: &HarnessConfig, prompt: &str, model: Option<&str>) ->
     args
 }
 
+/// Wait for SIGINT or SIGTERM. On non-Unix platforms, returns a future that
+/// never resolves (signals are handled by the OS default behavior).
+#[cfg(unix)]
+async fn setup_signal_handler() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+    tokio::select! {
+        _ = sigint.recv() => {}
+        _ = sigterm.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn setup_signal_handler() {
+    std::future::pending::<()>().await;
+}
+
+/// Kill a harness subprocess and all processes in its group, then reap.
+///
+/// On Unix, sends SIGKILL to the entire process group (the child was spawned
+/// with `process_group(0)` so it leads its own group). Falls back to killing
+/// just the child on non-Unix or if the group kill fails.
+async fn kill_and_reap(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // Safety: sending a signal to a process group is a well-defined POSIX operation.
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill().await;
+    }
+
+    let _ = child.wait().await;
+}
+
 /// Spawn a harness subprocess, stream its output in real-time, and return
 /// the captured output and exit code.
 ///
@@ -116,12 +158,17 @@ pub async fn run_harness(
         PromptMode::Arg => Stdio::null(),
     };
 
-    let mut child = Command::new(&harness.command)
-        .args(&args)
+    let mut cmd = Command::new(&harness.command);
+    cmd.args(&args)
         .current_dir(cwd)
         .stdin(stdin_cfg)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning harness command: {}", harness.command))?;
 
@@ -133,7 +180,9 @@ pub async fn run_harness(
             .write_all(prompt.as_bytes())
             .await
             .context("writing prompt to harness stdin")?;
-        // Drop stdin to close it, signaling EOF
+        // Explicitly drop stdin to close the pipe and signal EOF to the child;
+        // without this the harness may block waiting for more input.
+        drop(stdin);
     }
 
     let stdout_pipe = child.stdout.take().expect("stdout should be piped");
@@ -147,6 +196,9 @@ pub async fn run_harness(
 
     let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
     tokio::pin!(timeout);
+
+    let signal_fut = setup_signal_handler();
+    tokio::pin!(signal_fut);
 
     // Read stdout/stderr concurrently, with timeout
     loop {
@@ -163,13 +215,17 @@ pub async fn run_harness(
                         stdout_buf.push_str(&line);
                     }
                     Ok(None) => {
-                        // stdout closed — drain remaining stderr then wait for exit
-                        while let Ok(Some(line)) = stderr_reader.next_line().await {
-                            if !stderr_buf.is_empty() {
-                                stderr_buf.push('\n');
+                        // stdout closed — drain remaining stderr with a timeout
+                        // to avoid hanging if the pipe stays open indefinitely
+                        let drain = async {
+                            while let Ok(Some(line)) = stderr_reader.next_line().await {
+                                if !stderr_buf.is_empty() {
+                                    stderr_buf.push('\n');
+                                }
+                                stderr_buf.push_str(&line);
                             }
-                            stderr_buf.push_str(&line);
-                        }
+                        };
+                        let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
                         break;
                     }
                     Err(e) => {
@@ -186,16 +242,20 @@ pub async fn run_harness(
                         stderr_buf.push_str(&line);
                     }
                     Ok(None) => {
-                        // stderr closed — drain remaining stdout then wait for exit
-                        while let Ok(Some(line)) = stdout_reader.next_line().await {
-                            if stream_stdout {
-                                println!("{}", line);
+                        // stderr closed — drain remaining stdout with a timeout
+                        // to avoid hanging if the pipe stays open indefinitely
+                        let drain = async {
+                            while let Ok(Some(line)) = stdout_reader.next_line().await {
+                                if stream_stdout {
+                                    println!("{}", line);
+                                }
+                                if !stdout_buf.is_empty() {
+                                    stdout_buf.push('\n');
+                                }
+                                stdout_buf.push_str(&line);
                             }
-                            if !stdout_buf.is_empty() {
-                                stdout_buf.push('\n');
-                            }
-                            stdout_buf.push_str(&line);
-                        }
+                        };
+                        let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
                         break;
                     }
                     Err(e) => {
@@ -204,12 +264,15 @@ pub async fn run_harness(
                 }
             }
             _ = &mut timeout => {
-                // Kill the subprocess on timeout
-                let _ = child.kill().await;
+                kill_and_reap(&mut child).await;
                 bail!(
                     "harness timed out after {} seconds",
                     timeout_secs
                 );
+            }
+            _ = &mut signal_fut => {
+                kill_and_reap(&mut child).await;
+                bail!("interrupted by signal");
             }
         }
     }

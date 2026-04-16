@@ -1,16 +1,16 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::db;
-use crate::dirs;
 use crate::git;
 use crate::harness;
 use crate::models::conversation::Conversation;
 use crate::models::package::{Package, SourceType};
+use crate::paths;
 
 /// The JSON log file written to disk for each conversation.
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,7 +43,7 @@ pub struct AskArgs<'a> {
     pub context: u32,
 }
 
-pub fn run(args: AskArgs<'_>) -> Result<()> {
+pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     let AskArgs {
         identifier,
         question,
@@ -56,12 +56,12 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
     } = args;
 
     // 1. Open DB and look up package.
-    let db_path = dirs::db_file()?;
+    let db_path = paths::db_file()?;
     let conn = db::open(&db_path)?;
 
     let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Package '{}' not found. Run `kcl list` to see available packages.",
+            "Package `{}` not found. Run `kcl list` to see available packages.",
             identifier
         )
     })?;
@@ -80,7 +80,7 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
         .get(&harness_name)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Harness '{}' not found in config. Run `kcl init` to detect harnesses or `kcl config set harnesses.{}.command <path>` to add it manually.",
+                "Harness `{}` not found in config. Run `kcl init` to detect harnesses or `kcl config set harnesses.{}.command <path>` to add it manually.",
                 harness_name,
                 harness_name
             )
@@ -88,6 +88,7 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
         .clone();
 
     let timeout = timeout_override.unwrap_or(config.default_timeout);
+    crate::config::validate_timeout(timeout)?;
 
     // Resolve the effective model: CLI flag wins, otherwise fall back to the
     // harness's configured `default_model` (if any). The resolved value is
@@ -104,7 +105,7 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
     let original_branch: Option<String> = if let Some(target_branch) = branch_override {
         if pkg.source_type != SourceType::Git {
             anyhow::bail!(
-                "--branch is only valid for git packages; '{}' is a local package",
+                "--branch is only valid for git packages; `{}` is a local package",
                 pkg.identifier
             );
         }
@@ -129,13 +130,15 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
         None
     };
 
-    // 3b. Auto-pull if applicable. We always pull when --branch is supplied
-    //     (so the user gets the latest of that branch), regardless of
-    //     --no-pull or the package's auto_pull setting.
-    let should_pull = if branch_override.is_some() {
+    // 3b. Auto-pull if applicable. --no-pull always wins. When --branch is
+    //     supplied we default to pulling (so the user gets the latest of
+    //     that branch), but --no-pull can suppress it.
+    let should_pull = if no_pull {
+        false
+    } else if branch_override.is_some() {
         true
     } else {
-        !no_pull && pkg.auto_pull && pkg.source_type == SourceType::Git
+        pkg.auto_pull && pkg.source_type == SourceType::Git
     };
     if should_pull && pkg.source_type == SourceType::Git {
         eprintln!("pulling {} ...", pkg.identifier);
@@ -163,28 +166,30 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
     // 5. Spawn harness subprocess.
     let started_at = Utc::now();
 
-    let rt = tokio::runtime::Runtime::new()?;
     let cwd = std::path::PathBuf::from(&pkg.path);
 
-    let harness_result = rt.block_on(harness::run_harness(
+    let harness_result = harness::run_harness(
         &harness_config,
         &prompt,
         &cwd,
         timeout,
         true, // stream stdout to caller
         effective_model.as_deref(),
-    ));
+    )
+    .await;
 
     let finished_at = Utc::now();
 
-    // Handle harness execution result. Make sure we always restore the
-    // original branch (if we changed it) before propagating an error.
-    let output = match harness_result {
-        Ok(output) => output,
+    // Handle harness execution result. Regardless of success or failure we
+    // persist a conversation record so every invocation appears in `kcl history`.
+    let (response_text, exit_code) = match harness_result {
+        Ok(output) => {
+            let code = output.exit_code.unwrap_or(1);
+            (output.stdout, Some(code))
+        }
         Err(e) => {
             eprintln!("error: {}", e);
-            restore_branch(repo_path, original_branch.as_deref());
-            std::process::exit(2);
+            (format!("[error] {}", e), None)
         }
     };
 
@@ -195,9 +200,10 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
     let log_filename = format!("{}-{}.json", timestamp, short_id);
     let relative_log_path = format!("{}/{}", pkg.identifier, log_filename);
 
-    let log_dir = dirs::log_dir()?;
+    let log_dir = paths::log_dir()?;
     let pkg_log_dir = log_dir.join(&pkg.identifier);
-    std::fs::create_dir_all(&pkg_log_dir)?;
+    std::fs::create_dir_all(&pkg_log_dir)
+        .with_context(|| format!("failed to create log directory {}", pkg_log_dir.display()))?;
 
     // Only record the model in the log if the harness actually accepted it.
     // (model_args being non-empty is the signal that the model was forwarded.)
@@ -214,13 +220,14 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
         model: logged_model,
         started_at: started_at.to_rfc3339(),
         finished_at: finished_at.to_rfc3339(),
-        exit_code: output.exit_code,
-        response: output.stdout.clone(),
+        exit_code,
+        response: response_text,
     };
 
     let log_path = pkg_log_dir.join(&log_filename);
     let log_json = serde_json::to_string_pretty(&log)?;
-    std::fs::write(&log_path, &log_json)?;
+    std::fs::write(&log_path, &log_json)
+        .with_context(|| format!("failed to write conversation log to {}", log_path.display()))?;
 
     // 7. Insert conversation index row into SQLite.
     let conversation = Conversation {
@@ -228,7 +235,7 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
         package_id: pkg.id.clone(),
         question: question.to_string(),
         harness: harness_name,
-        exit_code: output.exit_code,
+        exit_code,
         log_path: relative_log_path,
         created_at: started_at,
     };
@@ -238,12 +245,10 @@ pub fn run(args: AskArgs<'_>) -> Result<()> {
     //    harness exit code.
     restore_branch(repo_path, original_branch.as_deref());
 
-    let exit_code = output.exit_code.unwrap_or(1);
-    if exit_code != 0 {
-        std::process::exit(2);
+    match exit_code {
+        Some(0) => Ok(0),
+        _ => Ok(2),
     }
-
-    Ok(())
 }
 
 /// Try to restore `repo_path` to the previously checked-out branch.
@@ -357,6 +362,61 @@ mod tests {
         assert_eq!(questions[0], "Question 4");
         assert_eq!(questions[1], "Question 3");
         assert_eq!(questions[2], "Question 2");
+    }
+
+    #[test]
+    fn conversation_log_captures_harness_error() {
+        let log = ConversationLog {
+            id: "err-123".to_string(),
+            package_id: "pkg-uuid".to_string(),
+            package_identifier: "broken-pkg".to_string(),
+            question: "Will this fail?".to_string(),
+            harness: "claude".to_string(),
+            model: None,
+            started_at: "2026-04-07T10:30:00+00:00".to_string(),
+            finished_at: "2026-04-07T10:30:05+00:00".to_string(),
+            exit_code: None,
+            response: "[error] harness timed out after 120s".to_string(),
+        };
+
+        let json = serde_json::to_string_pretty(&log).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["id"], "err-123");
+        assert_eq!(parsed["package_identifier"], "broken-pkg");
+        assert!(parsed["exit_code"].is_null());
+        assert!(parsed["response"].as_str().unwrap().starts_with("[error]"));
+    }
+
+    #[test]
+    fn failed_harness_creates_db_record() {
+        let conn = db::open_memory().unwrap();
+        let pkg = Package::new(
+            "fail-pkg".to_string(),
+            "Fail Package".to_string(),
+            SourceType::Local,
+            None,
+            None,
+            "/tmp/fail-pkg".to_string(),
+            false,
+            None,
+        );
+        pkg.insert(&conn).unwrap();
+
+        let conv = Conversation::new(
+            pkg.id.clone(),
+            "question that fails".to_string(),
+            "claude".to_string(),
+            None,
+            "/tmp/logs/fail.json".to_string(),
+        );
+        conv.insert(&conn).unwrap();
+
+        let retrieved = Conversation::get_by_id(&conn, &conv.id)
+            .unwrap()
+            .expect("failed conversation should be persisted");
+        assert_eq!(retrieved.exit_code, None);
+        assert_eq!(retrieved.question, "question that fails");
     }
 
     #[test]

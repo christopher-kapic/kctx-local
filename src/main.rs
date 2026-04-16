@@ -2,20 +2,20 @@ mod cli;
 mod commands;
 mod config;
 mod db;
-mod dirs;
 mod git;
 mod harness;
 mod models;
+mod paths;
 
-use anyhow::Result;
 use clap::Parser;
 
 use cli::{Cli, Command};
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
-    match &cli.command {
+    let result = match &cli.command {
         Command::Ask {
             identifier,
             question,
@@ -25,34 +25,45 @@ fn main() -> Result<()> {
             no_pull,
             branch,
             context,
-        } => commands::ask::run(commands::ask::AskArgs {
-            identifier,
-            question,
-            harness_override: harness.as_deref(),
-            model: model.as_deref(),
-            timeout_override: *timeout,
-            no_pull: *no_pull,
-            branch_override: branch.as_deref(),
-            context: *context,
-        }),
+        } => {
+            commands::ask::run(commands::ask::AskArgs {
+                identifier,
+                question,
+                harness_override: harness.as_deref(),
+                model: model.as_deref(),
+                timeout_override: *timeout,
+                no_pull: *no_pull,
+                branch_override: branch.as_deref(),
+                context: *context,
+            })
+            .await
+        }
 
         Command::List { verbose, json } => {
-            // Alias for packages list
             let cmd = cli::PackagesCommand::List {
                 verbose: *verbose,
                 json: *json,
             };
-            commands::packages::run(&cmd)
+            commands::packages::run(&cmd).map(|()| 0)
         }
 
-        Command::Packages { command } => commands::packages::run(command),
+        Command::Packages { command } => commands::packages::run(command).map(|()| 0),
 
-        Command::History { command } => commands::history::run(command),
+        Command::History { command } => commands::history::run(command).map(|()| 0),
 
-        Command::Config { command } => commands::config_cmd::run(command),
+        Command::Config { command } => commands::config_cmd::run(command).map(|()| 0),
 
-        Command::Harnesses { command } => commands::harnesses::run(command),
+        Command::Harnesses { command } => commands::harnesses::run(command).map(|()| 0),
 
-        Command::Init { non_interactive } => commands::init::run(*non_interactive),
+        Command::Init { non_interactive } => commands::init::run(*non_interactive).map(|()| 0),
+    };
+
+    match result {
+        Ok(0) => {}
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("error: {:#}", e);
+            std::process::exit(1);
+        }
     }
 }

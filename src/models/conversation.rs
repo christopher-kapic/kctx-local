@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use uuid::Uuid;
 
 /// A conversation log entry — an indexed record of a Q&A session.
@@ -20,7 +21,7 @@ pub struct Conversation {
 
 impl Conversation {
     /// Create a new Conversation with a generated UUID and current timestamp.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(
         package_id: String,
         question: String,
@@ -102,39 +103,36 @@ impl Conversation {
         limit: u32,
         since_days: Option<u32>,
     ) -> Result<Vec<Self>> {
-        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match since_days {
+        let mut conversations = Vec::new();
+        match since_days {
             Some(days) => {
                 let cutoff = Utc::now() - chrono::Duration::days(days as i64);
                 let cutoff_str = cutoff.to_rfc3339();
-                (
+                let mut stmt = conn.prepare(
                     "SELECT id, package_id, question, harness, exit_code, log_path, created_at
                      FROM conversations WHERE package_id = ?1 AND created_at >= ?2
-                     ORDER BY created_at DESC LIMIT ?3"
-                        .to_string(),
-                    vec![
-                        Box::new(package_id.to_string()),
-                        Box::new(cutoff_str),
-                        Box::new(limit),
-                    ],
-                )
+                     ORDER BY created_at DESC LIMIT ?3",
+                )?;
+                let rows = stmt.query_map(params![package_id, cutoff_str, limit], |row| {
+                    Ok(Self::from_row_inner(row))
+                })?;
+                for row in rows {
+                    conversations.push(row?.context("failed to read conversation row")?);
+                }
             }
-            None => (
-                "SELECT id, package_id, question, harness, exit_code, log_path, created_at
-                 FROM conversations WHERE package_id = ?1
-                 ORDER BY created_at DESC LIMIT ?2"
-                    .to_string(),
-                vec![Box::new(package_id.to_string()), Box::new(limit)],
-            ),
-        };
-
-        let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), |row| Ok(Self::from_row_inner(row)))?;
-
-        let mut conversations = Vec::new();
-        for row in rows {
-            conversations.push(row?.context("failed to read conversation row")?);
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, package_id, question, harness, exit_code, log_path, created_at
+                     FROM conversations WHERE package_id = ?1
+                     ORDER BY created_at DESC LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(params![package_id, limit], |row| {
+                    Ok(Self::from_row_inner(row))
+                })?;
+                for row in rows {
+                    conversations.push(row?.context("failed to read conversation row")?);
+                }
+            }
         }
         Ok(conversations)
     }

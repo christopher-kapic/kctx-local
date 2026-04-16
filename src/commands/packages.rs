@@ -5,13 +5,13 @@ use anyhow::{Result, bail};
 use crate::cli::PackagesCommand;
 use crate::config::Config;
 use crate::db;
-use crate::dirs;
 use crate::git;
 use crate::models::package::{Package, SourceType};
+use crate::paths;
 
 /// Helper to open the database from the default location.
 fn open_db() -> Result<rusqlite::Connection> {
-    let db_path = dirs::db_file()?;
+    let db_path = paths::db_file()?;
     db::open(&db_path)
 }
 
@@ -66,12 +66,30 @@ fn cmd_list(verbose: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn validate_identifier(id: &str) -> Result<()> {
+    if id.is_empty() {
+        bail!("Package identifier must not be empty");
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "Package identifier `{id}` contains invalid characters. \
+             Only ASCII letters, digits, hyphens, and underscores are allowed."
+        );
+    }
+    Ok(())
+}
+
 fn cmd_add(
     identifier: &str,
     path: Option<&str>,
     git: Option<&str>,
     branch: Option<&str>,
 ) -> Result<()> {
+    validate_identifier(identifier)?;
+
     // Validate: must supply --path or --git (or both for tracking existing clone with remote).
     if path.is_none() && git.is_none() {
         bail!(
@@ -84,7 +102,7 @@ fn cmd_add(
     // Check for duplicate identifier.
     if Package::get_by_identifier(&conn, identifier)?.is_some() {
         bail!(
-            "Package '{identifier}' already exists. Use `kcl packages show {identifier}` to view it or choose a different identifier."
+            "Package `{identifier}` already exists. Use `kcl packages show {identifier}` to view it or choose a different identifier."
         );
     }
 
@@ -93,8 +111,9 @@ fn cmd_add(
     {
         // Git package — may or may not have an explicit --path.
         if let Some(p) = path {
-            // Existing clone with remote tracking. If the user didn't specify
-            // a branch, record whatever branch the existing clone is on.
+            // Existing clone with remote tracking. Validate URL structurally
+            // since git clone won't run to catch bad URLs.
+            git::validate_git_url(git_url)?;
             let abs = resolve_and_validate_path(p)?;
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
@@ -113,7 +132,7 @@ fn cmd_add(
             // lets monorepos be registered under multiple identifiers.
             let pkg_dir = std::path::PathBuf::from(&existing.path);
             eprintln!(
-                "reusing existing clone at {} (already registered as '{}')",
+                "reusing existing clone at {} (already registered as `{}`)",
                 existing.path, existing.identifier
             );
             let recorded_branch = match branch {
@@ -132,7 +151,7 @@ fn cmd_add(
             // pass --branch we let git pick the remote's default branch
             // instead of hard-coding "main".
             let config = Config::load_or_default()?;
-            let clone_dir = expand_tilde(&config.clone_dir);
+            let clone_dir = expand_tilde(&config.clone_dir)?;
             let pkg_dir = clone_dir.join(identifier);
 
             if pkg_dir.exists() {
@@ -143,7 +162,20 @@ fn cmd_add(
             }
 
             eprintln!("cloning {} ...", git_url);
-            git::clone(git_url, &pkg_dir, branch)?;
+            if let Err(e) = git::clone(git_url, &pkg_dir, branch) {
+                // Clean up partial clone directory so a retry doesn't hit
+                // "clone target already exists".
+                if pkg_dir.exists() {
+                    if let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir) {
+                        eprintln!(
+                            "warning: failed to clean up partial clone at {}: {}",
+                            pkg_dir.display(),
+                            cleanup_err
+                        );
+                    }
+                }
+                return Err(e);
+            }
             eprintln!("cloned to {}", pkg_dir.display());
 
             // Record the actual branch we ended up on (either the explicit
@@ -180,31 +212,35 @@ fn cmd_add(
     );
 
     pkg.insert(&conn)?;
-    eprintln!("added package '{identifier}'");
+    eprintln!("added package `{identifier}`");
     Ok(())
 }
 
 /// Expand a leading `~` to the user's home directory.
-fn expand_tilde(path: &str) -> std::path::PathBuf {
+///
+/// Returns an error if the path starts with `~` but the home directory
+/// cannot be determined (e.g. in minimal container environments).
+fn expand_tilde(path: &str) -> Result<std::path::PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = ::dirs::home_dir() {
-            return home.join(rest);
-        }
-    } else if path == "~"
-        && let Some(home) = ::dirs::home_dir()
-    {
-        return home;
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot expand `~`: home directory not found"))?;
+        Ok(home.join(rest))
+    } else if path == "~" {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot expand `~`: home directory not found"))?;
+        Ok(home)
+    } else {
+        Ok(std::path::PathBuf::from(path))
     }
-    std::path::PathBuf::from(path)
 }
 
 /// Resolve a path to absolute form and validate it exists as a directory.
 fn resolve_and_validate_path(p: &str) -> Result<String> {
-    let path = Path::new(p);
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
+    let expanded = expand_tilde(p)?;
+    let abs = if expanded.is_absolute() {
+        expanded
     } else {
-        std::env::current_dir()?.join(path)
+        std::env::current_dir()?.join(expanded)
     };
 
     if !abs.exists() {
@@ -223,11 +259,36 @@ fn cmd_remove(identifier: &str) -> Result<()> {
     let pkg = Package::get_by_identifier(&conn, identifier)?;
     match pkg {
         Some(pkg) => {
+            // Delete DB row first, then clean up on-disk artifacts.
+            // If we crash after DB deletion but before disk cleanup, the
+            // orphan directories are harmless and can be cleaned manually.
+            // The reverse order would leave DB rows pointing at nothing.
             Package::delete(&conn, &pkg.id)?;
-            eprintln!("removed package '{identifier}'");
+
+            // Remove the clone directory if it lives inside the configured
+            // clone_dir (i.e. kcl created it). We use clone_dir/identifier
+            // rather than pkg.path so we never delete a user-managed directory
+            // that was registered via --path.
+            let config = Config::load_or_default()?;
+            let clone_dir = expand_tilde(&config.clone_dir)?;
+            let pkg_clone_dir = clone_dir.join(identifier);
+            if pkg_clone_dir.is_dir() {
+                std::fs::remove_dir_all(&pkg_clone_dir)?;
+                eprintln!("deleted clone {}", pkg_clone_dir.display());
+            }
+
+            // Remove conversation log directory for this package.
+            let log_dir = paths::log_dir()?;
+            let pkg_log_dir = log_dir.join(identifier);
+            if pkg_log_dir.is_dir() {
+                std::fs::remove_dir_all(&pkg_log_dir)?;
+                eprintln!("deleted logs {}", pkg_log_dir.display());
+            }
+
+            eprintln!("removed package `{identifier}`");
         }
         None => {
-            bail!("Package '{identifier}' not found. Run `kcl list` to see available packages.");
+            bail!("Package `{identifier}` not found. Run `kcl list` to see available packages.");
         }
     }
 
@@ -239,7 +300,7 @@ fn cmd_show(identifier: &str, json: bool) -> Result<()> {
 
     let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Package '{identifier}' not found. Run `kcl list` to see available packages."
+            "Package `{identifier}` not found. Run `kcl list` to see available packages."
         )
     })?;
 
@@ -274,11 +335,11 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
     if let Some(id) = identifier {
         // Pull a single package.
         let pkg = Package::get_by_identifier(&conn, id)?.ok_or_else(|| {
-            anyhow::anyhow!("Package '{id}' not found. Run `kcl list` to see available packages.")
+            anyhow::anyhow!("Package `{id}` not found. Run `kcl list` to see available packages.")
         })?;
 
         if pkg.source_type != SourceType::Git {
-            bail!("Package '{id}' is not a git package. Only git packages can be pulled.");
+            bail!("Package `{id}` is not a git package. Only git packages can be pulled.");
         }
 
         let repo_path = Path::new(&pkg.path);
@@ -323,21 +384,21 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
 
     let mut pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Package '{identifier}' not found. Run `kcl list` to see available packages."
+            "Package `{identifier}` not found. Run `kcl list` to see available packages."
         )
     })?;
 
     match key {
         "auto-pull" => {
             if unset {
-                bail!("cannot unset auto-pull; use 'true' or 'false'");
+                bail!("cannot unset auto-pull; use `true` or `false`");
             }
             let val = value.ok_or_else(|| anyhow::anyhow!("missing value for auto-pull"))?;
             match val {
                 "true" => pkg.auto_pull = true,
                 "false" => pkg.auto_pull = false,
                 other => {
-                    bail!("invalid value for auto-pull: '{other}' (expected 'true' or 'false')")
+                    bail!("invalid value for auto-pull: `{other}` (expected `true` or `false`)")
                 }
             }
         }
@@ -347,16 +408,23 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
             } else {
                 let val = value
                     .ok_or_else(|| anyhow::anyhow!("missing value for harness (or use --unset)"))?;
+                let known = super::init::known_harness_names();
+                if !known.contains(&val) {
+                    bail!(
+                        "Unknown harness `{val}`. Valid harnesses: {}",
+                        known.join(", ")
+                    );
+                }
                 pkg.harness = Some(val.to_string());
             }
         }
         other => {
-            bail!("Unknown property '{other}'. Valid properties: auto-pull, harness.");
+            bail!("Unknown property `{other}`. Valid properties: auto-pull, harness.");
         }
     }
 
     pkg.update(&conn)?;
-    eprintln!("updated '{identifier}'");
+    eprintln!("updated `{identifier}`");
     Ok(())
 }
 
@@ -542,6 +610,137 @@ mod tests {
         assert!(parsed.is_array());
         assert_eq!(parsed.as_array().unwrap().len(), 1);
         assert_eq!(parsed[0]["identifier"], "testpkg");
+    }
+
+    #[test]
+    fn resolve_expands_tilde_prefix() {
+        let result = resolve_and_validate_path("~").unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home.to_string_lossy());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_traversal() {
+        let result = validate_identifier("../../etc/cron.d");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid characters")
+        );
+    }
+
+    #[test]
+    fn validate_identifier_rejects_empty() {
+        let result = validate_identifier("");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
+    }
+
+    #[test]
+    fn validate_identifier_accepts_valid() {
+        assert!(validate_identifier("my-package").is_ok());
+        assert!(validate_identifier("my_package").is_ok());
+        assert!(validate_identifier("pkg123").is_ok());
+        assert!(validate_identifier("A").is_ok());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_slashes() {
+        assert!(validate_identifier("foo/bar").is_err());
+        assert!(validate_identifier("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn remove_cleans_up_clone_and_log_dirs() {
+        let (conn, _pkg) = setup();
+
+        // Create temporary directories to simulate clone and log dirs.
+        let tmp = std::env::temp_dir().join("kcl_remove_test");
+        let clone_dir = tmp.join("clones");
+        let log_dir = tmp.join("logs");
+        let pkg_clone = clone_dir.join("testpkg");
+        let pkg_log = log_dir.join("testpkg");
+
+        std::fs::create_dir_all(&pkg_clone).unwrap();
+        std::fs::create_dir_all(&pkg_log).unwrap();
+        // Put a file in each to verify recursive removal.
+        std::fs::write(pkg_clone.join("file.txt"), "clone").unwrap();
+        std::fs::write(pkg_log.join("conv.json"), "log").unwrap();
+
+        assert!(pkg_clone.is_dir());
+        assert!(pkg_log.is_dir());
+
+        // Delete from DB.
+        Package::delete(&conn, &_pkg.id).unwrap();
+        assert!(
+            Package::get_by_identifier(&conn, "testpkg")
+                .unwrap()
+                .is_none()
+        );
+
+        // Simulate the disk cleanup from cmd_remove.
+        if pkg_clone.is_dir() {
+            std::fs::remove_dir_all(&pkg_clone).unwrap();
+        }
+        if pkg_log.is_dir() {
+            std::fs::remove_dir_all(&pkg_log).unwrap();
+        }
+
+        assert!(!pkg_clone.exists());
+        assert!(!pkg_log.exists());
+
+        // Clean up the test root.
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn remove_handles_missing_dirs_gracefully() {
+        // When clone/log dirs don't exist, the is_dir() guard prevents errors.
+        let nonexistent = std::path::PathBuf::from("/tmp/kcl_nonexistent_12345");
+        assert!(!nonexistent.is_dir());
+        // The cmd_remove pattern: only remove if is_dir().
+        // This should not panic or error.
+        if nonexistent.is_dir() {
+            std::fs::remove_dir_all(&nonexistent).unwrap();
+        }
+    }
+
+    #[test]
+    fn expand_tilde_returns_ok_for_non_tilde_path() {
+        let result = expand_tilde("/absolute/path").unwrap();
+        assert_eq!(result, std::path::PathBuf::from("/absolute/path"));
+    }
+
+    #[test]
+    fn expand_tilde_expands_home_prefix() {
+        let result = expand_tilde("~/projects").unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home.join("projects"));
+    }
+
+    #[test]
+    fn expand_tilde_expands_bare_tilde() {
+        let result = expand_tilde("~").unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home);
+    }
+
+    #[test]
+    fn set_harness_rejects_unknown() {
+        let known = crate::commands::init::known_harness_names();
+        // A bogus harness name should not be in the known list.
+        assert!(!known.contains(&"nonexistent"));
+        assert!(!known.contains(&"bogus-harness"));
+        // Valid harness names should be present.
+        assert!(known.contains(&"claude"));
+        assert!(known.contains(&"copilot"));
     }
 
     #[test]

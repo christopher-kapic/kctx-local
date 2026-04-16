@@ -3,9 +3,9 @@ use serde::Serialize;
 
 use crate::cli::HistoryCommand;
 use crate::db;
-use crate::dirs;
 use crate::models::conversation::Conversation;
 use crate::models::package::Package;
+use crate::paths;
 
 /// A human-friendly summary of a conversation for list output.
 #[derive(Debug, Serialize)]
@@ -42,12 +42,12 @@ pub fn run(command: &HistoryCommand) -> Result<()> {
 }
 
 fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Result<()> {
-    let db_path = dirs::db_file()?;
+    let db_path = paths::db_file()?;
     let conn = db::open(&db_path)?;
 
     let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Package '{}' not found. Run `kcl list` to see available packages.",
+            "Package `{}` not found. Run `kcl list` to see available packages.",
             identifier
         )
     })?;
@@ -63,7 +63,7 @@ fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Res
         println!("{}", output);
     } else {
         if conversations.is_empty() {
-            println!("No conversations found for '{}'.", identifier);
+            println!("No conversations found for `{}`.", identifier);
             return Ok(());
         }
 
@@ -74,8 +74,8 @@ fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Res
             };
             let ts = conv.created_at.format("%Y-%m-%d %H:%M:%S");
             // Truncate long questions for display.
-            let question_display = if conv.question.len() > 80 {
-                format!("{}...", &conv.question[..77])
+            let question_display = if conv.question.chars().count() > 80 {
+                format!("{}...", conv.question.chars().take(77).collect::<String>())
             } else {
                 conv.question.clone()
             };
@@ -90,19 +90,19 @@ fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Res
 }
 
 fn run_show(id: &str, json: bool) -> Result<()> {
-    let db_path = dirs::db_file()?;
+    let db_path = paths::db_file()?;
     let conn = db::open(&db_path)?;
 
     let conv = Conversation::get_by_id(&conn, id)?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Conversation '{}' not found. Run `kcl history list <package>` to see available conversations.",
+                "Conversation `{}` not found. Run `kcl history list <package>` to see available conversations.",
                 id
             )
         })?;
 
     // Resolve the full log path.
-    let log_dir = dirs::log_dir()?;
+    let log_dir = paths::log_dir()?;
     let log_path = log_dir.join(&conv.log_path);
 
     if !log_path.exists() {
@@ -255,6 +255,23 @@ mod tests {
         assert_eq!(parsed["question"], "Test question");
         assert_eq!(parsed["harness"], "copilot");
         assert!(parsed["exit_code"].is_null());
+    }
+
+    #[test]
+    fn truncate_multibyte_question_does_not_panic() {
+        // 90 emoji characters — each is 4 bytes, so byte-indexing at 77 would split a char.
+        let long_question = "🦀".repeat(90);
+        assert!(long_question.len() > 80);
+        assert!(long_question.chars().count() > 80);
+
+        let display = if long_question.chars().count() > 80 {
+            format!("{}...", long_question.chars().take(77).collect::<String>())
+        } else {
+            long_question.clone()
+        };
+
+        assert_eq!(display.chars().count(), 80); // 77 crabs + 3 dots
+        assert!(display.ends_with("..."));
     }
 
     #[test]
