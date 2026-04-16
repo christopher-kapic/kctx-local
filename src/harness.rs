@@ -281,7 +281,13 @@ pub async fn run_harness(
         }
     }
 
-    let status = child.wait().await.context("waiting for harness to exit")?;
+    let status = match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+        Ok(res) => res.context("waiting for harness to exit")?,
+        Err(_) => {
+            kill_and_reap(&mut child).await;
+            bail!("harness did not exit after closing output pipes");
+        }
+    };
 
     Ok(HarnessOutput {
         exit_code: status.code(),
