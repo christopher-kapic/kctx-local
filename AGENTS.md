@@ -24,7 +24,7 @@ src/
   cli.rs               — Clap command/arg definitions
   config.rs            — Config loading (~/.config/kcl/config.json)
   db.rs                — SQLite connection, migrations
-  dirs.rs              — Platform directory resolution
+  paths.rs             — Platform directory resolution
   models/
     package.rs         — Package struct + CRUD
     conversation.rs    — Conversation index + CRUD
