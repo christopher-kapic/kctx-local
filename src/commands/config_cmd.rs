@@ -1,19 +1,19 @@
 use anyhow::{Context, Result, bail};
 
 use crate::cli::ConfigCommand;
-use crate::config::Config;
+use crate::config::{Config, HarnessConfig, PromptMode};
 use crate::paths;
 
 pub fn run(command: &ConfigCommand) -> Result<()> {
     match command {
-        ConfigCommand::Show { json: _ } => cmd_show(),
+        ConfigCommand::Show { json } => cmd_show(*json),
         ConfigCommand::Edit => cmd_edit(),
         ConfigCommand::Set { key, value } => cmd_set(key, value),
         ConfigCommand::Path => cmd_path(),
     }
 }
 
-fn cmd_show() -> Result<()> {
+fn cmd_show(json: bool) -> Result<()> {
     let path = paths::config_file()?;
     if !path.exists() {
         bail!(
@@ -22,10 +22,66 @@ fn cmd_show() -> Result<()> {
         );
     }
     let config = Config::load(&path)?;
-    // Config show always outputs JSON (it's the native format).
-    let output = serde_json::to_string_pretty(&config).context("serializing config")?;
-    println!("{}", output);
+
+    if json {
+        let output = serde_json::to_string_pretty(&config).context("serializing config")?;
+        println!("{}", output);
+        return Ok(());
+    }
+
+    print!("{}", format_human(&config));
     Ok(())
+}
+
+fn format_human(config: &Config) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(out, "clone_dir:        {}", config.clone_dir).unwrap();
+    writeln!(out, "default_harness:  {}", config.default_harness).unwrap();
+    writeln!(out, "default_timeout:  {}", config.default_timeout).unwrap();
+
+    if config.harnesses.is_empty() {
+        writeln!(out, "harnesses:        (none configured)").unwrap();
+        return out;
+    }
+
+    writeln!(out, "harnesses:").unwrap();
+    let mut names: Vec<&String> = config.harnesses.keys().collect();
+    names.sort();
+    for name in names {
+        let h: &HarnessConfig = &config.harnesses[name];
+        let marker = if name == &config.default_harness {
+            " (default)"
+        } else {
+            ""
+        };
+        writeln!(out, "  {}{}", name, marker).unwrap();
+        writeln!(out, "    command:       {}", h.command).unwrap();
+        writeln!(out, "    prompt_mode:   {}", prompt_mode_str(&h.prompt_mode)).unwrap();
+        writeln!(out, "    args:          {}", format_args(&h.args)).unwrap();
+        if !h.model_args.is_empty() {
+            writeln!(out, "    model_args:    {}", h.model_args.join(" ")).unwrap();
+        }
+        if let Some(model) = &h.default_model {
+            writeln!(out, "    default_model: {}", model).unwrap();
+        }
+    }
+    out
+}
+
+fn prompt_mode_str(mode: &PromptMode) -> &'static str {
+    match mode {
+        PromptMode::Arg => "arg",
+        PromptMode::Stdin => "stdin",
+    }
+}
+
+fn format_args(args: &[String]) -> String {
+    if args.is_empty() {
+        "-".to_string()
+    } else {
+        args.join(" ")
+    }
 }
 
 fn cmd_edit() -> Result<()> {
@@ -231,5 +287,55 @@ mod tests {
         assert!(parsed.is_object());
         assert_eq!(parsed["default_harness"], "claude");
         assert_eq!(parsed["default_timeout"], 120);
+    }
+
+    #[test]
+    fn format_human_shows_top_level_keys() {
+        let config = Config::default();
+        let out = super::format_human(&config);
+        assert!(out.contains("clone_dir:        ~/src/kcl-packages"));
+        assert!(out.contains("default_harness:  claude"));
+        assert!(out.contains("default_timeout:  120"));
+        assert!(out.contains("harnesses:        (none configured)"));
+        // Human output must NOT look like JSON.
+        assert!(!out.trim_start().starts_with('{'));
+    }
+
+    #[test]
+    fn format_human_shows_harnesses_with_default_marker() {
+        use crate::config::{HarnessConfig, PromptMode};
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec!["-p".to_string(), "{prompt}".to_string()],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec!["--model".to_string(), "{model}".to_string()],
+                default_model: Some("claude-sonnet-4-6".to_string()),
+            },
+        );
+        config.harnesses.insert(
+            "pi".to_string(),
+            HarnessConfig {
+                command: "pi".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Stdin,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+
+        let out = super::format_human(&config);
+        assert!(out.contains("claude (default)"));
+        assert!(out.contains("pi\n"));
+        assert!(!out.contains("pi (default)"));
+        assert!(out.contains("command:       claude"));
+        assert!(out.contains("prompt_mode:   arg"));
+        assert!(out.contains("prompt_mode:   stdin"));
+        assert!(out.contains("args:          -p {prompt}"));
+        assert!(out.contains("args:          -"));
+        assert!(out.contains("model_args:    --model {model}"));
+        assert!(out.contains("default_model: claude-sonnet-4-6"));
     }
 }

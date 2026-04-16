@@ -201,9 +201,9 @@ pub enum HistoryCommand {
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Print current config as JSON
+    /// Print current config
     Show {
-        /// Output as JSON (default behavior, kept for consistency)
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
