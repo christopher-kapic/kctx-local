@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::cli::PackagesCommand;
 use crate::config::Config;
@@ -131,10 +131,32 @@ fn cmd_add(
             // reuse its on-disk clone instead of cloning a second time. This
             // lets monorepos be registered under multiple identifiers.
             let pkg_dir = std::path::PathBuf::from(&existing.path);
-            eprintln!(
-                "reusing existing clone at {} (already registered as `{}`)",
-                existing.path, existing.identifier
-            );
+            if std::fs::exists(&pkg_dir).with_context(|| {
+                format!("failed to check existing clone at {}", pkg_dir.display())
+            })? {
+                eprintln!(
+                    "reusing existing clone at {} (already registered as `{}`)",
+                    existing.path, existing.identifier
+                );
+            } else {
+                eprintln!(
+                    "existing clone at {} was removed; re-cloning (originally registered as `{}`)",
+                    existing.path, existing.identifier
+                );
+                if let Err(e) = git::clone(git_url, &pkg_dir, branch) {
+                    if pkg_dir.exists() {
+                        if let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir) {
+                            eprintln!(
+                                "warning: failed to clean up partial clone at {}: {}",
+                                pkg_dir.display(),
+                                cleanup_err
+                            );
+                        }
+                    }
+                    return Err(e);
+                }
+                eprintln!("cloned to {}", pkg_dir.display());
+            }
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
                 None => git::current_branch(&pkg_dir).ok(),
