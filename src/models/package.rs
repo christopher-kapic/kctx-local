@@ -166,7 +166,7 @@ impl Package {
 
     /// Update a package's mutable fields.
     pub fn update(&self, conn: &Connection) -> Result<()> {
-        conn.execute(
+        let affected = conn.execute(
             "UPDATE packages SET display_name = ?1, source_url = ?2, source_branch = ?3, path = ?4, auto_pull = ?5, harness = ?6, updated_at = ?7
              WHERE id = ?8",
             params![
@@ -181,6 +181,9 @@ impl Package {
             ],
         )
         .context("failed to update package")?;
+        if affected == 0 {
+            anyhow::bail!("package with id '{}' not found", self.id);
+        }
         Ok(())
     }
 
@@ -415,5 +418,18 @@ mod tests {
         assert_eq!(retrieved.display_name, "Updated Name");
         assert!(retrieved.auto_pull);
         assert_eq!(retrieved.harness.as_deref(), Some("copilot"));
+    }
+
+    #[test]
+    fn update_missing_package_errors() {
+        let conn = db::open_memory().unwrap();
+        let mut pkg = test_package("ghost");
+        // Don't insert — just try to update a non-existent row.
+        pkg.id = "nonexistent-id".to_string();
+        let err = pkg.update(&conn).unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "expected 'not found' error, got: {err}"
+        );
     }
 }
