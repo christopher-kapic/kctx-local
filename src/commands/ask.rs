@@ -209,8 +209,6 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
 
     let log_dir = paths::log_dir()?;
     let pkg_log_dir = log_dir.join(&pkg.identifier);
-    std::fs::create_dir_all(&pkg_log_dir)
-        .with_context(|| format!("failed to create log directory {}", pkg_log_dir.display()))?;
 
     // Only record the model in the log if the harness actually accepted it.
     // (model_args being non-empty is the signal that the model was forwarded.)
@@ -232,10 +230,16 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         pull_error,
     };
 
+    // Best-effort: the user has already received the harness response, so a
+    // failure to persist the log should not fail the command.
     let log_path = pkg_log_dir.join(&log_filename);
-    let log_json = serde_json::to_string_pretty(&log)?;
-    std::fs::write(&log_path, &log_json)
-        .with_context(|| format!("failed to write conversation log to {}", log_path.display()))?;
+    if let Err(e) = write_log_file(&pkg_log_dir, &log_path, &log) {
+        eprintln!(
+            "warning: failed to write conversation log to {}: {:#}",
+            log_path.display(),
+            e
+        );
+    }
 
     // 7. Insert conversation index row into SQLite.
     let conversation = Conversation {
@@ -257,6 +261,16 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         Some(0) => Ok(0),
         _ => Ok(2),
     }
+}
+
+/// Serialize `log` and write it to `log_path`, creating `pkg_log_dir` first.
+fn write_log_file(pkg_log_dir: &Path, log_path: &Path, log: &ConversationLog) -> Result<()> {
+    std::fs::create_dir_all(pkg_log_dir)
+        .with_context(|| format!("failed to create log directory {}", pkg_log_dir.display()))?;
+    let log_json = serde_json::to_string_pretty(log)?;
+    std::fs::write(log_path, log_json)
+        .with_context(|| format!("failed to write conversation log to {}", log_path.display()))?;
+    Ok(())
 }
 
 /// Try to restore `repo_path` to the previously checked-out branch.
