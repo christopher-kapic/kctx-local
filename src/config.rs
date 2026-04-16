@@ -116,6 +116,9 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let contents =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        if contents.trim().is_empty() {
+            return Ok(Self::default());
+        }
         let config: Config = serde_json::from_str(&contents)
             .with_context(|| format!("parsing {}", path.display()))?;
         validate_timeout(config.default_timeout)?;
@@ -341,6 +344,34 @@ mod tests {
         let err = "bogus".parse::<PromptMode>().unwrap_err();
         assert!(err.to_string().contains("invalid prompt_mode 'bogus'"));
         assert!(err.to_string().contains("'arg' or 'stdin'"));
+    }
+
+    #[test]
+    fn load_empty_file_returns_default() {
+        let dir = std::env::temp_dir().join("kcl-test-empty-config");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        std::fs::write(&path, "").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config, Config::default());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_whitespace_only_file_returns_default() {
+        let dir = std::env::temp_dir().join("kcl-test-whitespace-config");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        std::fs::write(&path, "  \n\t\n  ").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config, Config::default());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
