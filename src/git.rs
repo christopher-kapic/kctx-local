@@ -1,7 +1,7 @@
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use tokio::process::Command;
 
 /// Check that the `git` binary is available on PATH.
 fn check_git() -> Result<()> {
@@ -13,7 +13,7 @@ fn check_git() -> Result<()> {
 ///
 /// Shells out to `git clone <url> [--branch <branch>] <target_dir>`.
 /// Creates parent directories as needed.
-pub fn clone(url: &str, target_dir: &Path, branch: Option<&str>) -> Result<()> {
+pub async fn clone(url: &str, target_dir: &Path, branch: Option<&str>) -> Result<()> {
     check_git()?;
 
     // Ensure parent directory exists.
@@ -30,7 +30,7 @@ pub fn clone(url: &str, target_dir: &Path, branch: Option<&str>) -> Result<()> {
     cmd.arg(url);
     cmd.arg(target_dir);
 
-    let output = cmd.output().context("failed to execute git clone")?;
+    let output = cmd.output().await.context("failed to execute git clone")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -43,7 +43,7 @@ pub fn clone(url: &str, target_dir: &Path, branch: Option<&str>) -> Result<()> {
 /// Pull latest changes for a repository at the given path.
 ///
 /// Shells out to `git -C <path> pull`.
-pub fn pull(repo_path: &Path) -> Result<String> {
+pub async fn pull(repo_path: &Path) -> Result<String> {
     check_git()?;
 
     if !repo_path.exists() {
@@ -55,6 +55,7 @@ pub fn pull(repo_path: &Path) -> Result<String> {
         .arg(repo_path)
         .arg("pull")
         .output()
+        .await
         .context("failed to execute git pull")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -79,7 +80,7 @@ pub fn is_git_repo(path: &Path) -> bool {
 /// Shells out to `git -C <path> rev-parse --abbrev-ref HEAD`. If HEAD is
 /// detached this returns the literal string "HEAD" — callers that need to
 /// restore state should treat that as a special case.
-pub fn current_branch(repo_path: &Path) -> Result<String> {
+pub async fn current_branch(repo_path: &Path) -> Result<String> {
     check_git()?;
 
     let output = Command::new("git")
@@ -89,6 +90,7 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
         .arg("--abbrev-ref")
         .arg("HEAD")
         .output()
+        .await
         .context("failed to execute git rev-parse")?;
 
     if !output.status.success() {
@@ -103,7 +105,7 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
 ///
 /// Fetches from `origin` first so that branches that exist only on the
 /// remote can be checked out as new local tracking branches.
-pub fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
+pub async fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
     check_git()?;
 
     // Fetch so we can resolve remote-only branches. Failures here are not
@@ -115,6 +117,7 @@ pub fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
         .arg("origin")
         .arg(branch)
         .output()
+        .await
     {
         Ok(output) if output.status.success() => None,
         Ok(output) => {
@@ -136,6 +139,7 @@ pub fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
         .arg("checkout")
         .arg(branch)
         .output()
+        .await
         .context("failed to execute git checkout")?;
 
     if !output.status.success() {
@@ -188,9 +192,9 @@ mod tests {
         assert!(check_git().is_ok());
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore] // Requires network access; run with `cargo test -- --ignored`
-    fn clone_creates_directory_and_repo() {
+    async fn clone_creates_directory_and_repo() {
         let tmp = std::env::temp_dir().join("kcl-test-git-clone");
         // Clean up from any previous run.
         let _ = std::fs::remove_dir_all(&tmp);
@@ -200,7 +204,8 @@ mod tests {
             "https://github.com/nickel-org/rust-mustache.git",
             &target,
             None,
-        );
+        )
+        .await;
 
         assert!(result.is_ok(), "clone failed: {:?}", result.err());
         assert!(target.exists(), "target directory should exist after clone");
@@ -210,9 +215,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore] // Requires network access; run with `cargo test -- --ignored`
-    fn pull_on_cloned_repo() {
+    async fn pull_on_cloned_repo() {
         let tmp = std::env::temp_dir().join("kcl-test-git-pull");
         let _ = std::fs::remove_dir_all(&tmp);
 
@@ -222,9 +227,10 @@ mod tests {
             &target,
             None,
         )
+        .await
         .expect("clone should succeed");
 
-        let result = pull(&target);
+        let result = pull(&target).await;
         assert!(result.is_ok(), "pull failed: {:?}", result.err());
         let msg = result.unwrap();
         assert!(
@@ -235,21 +241,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn clone_fails_with_bad_url() {
+    #[tokio::test]
+    async fn clone_fails_with_bad_url() {
         let tmp = std::env::temp_dir().join("kcl-test-git-bad-clone");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let target = tmp.join("nonexistent");
-        let result = clone("https://example.com/nonexistent-repo.git", &target, None);
+        let result = clone("https://example.com/nonexistent-repo.git", &target, None).await;
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn pull_fails_on_nonexistent_path() {
-        let result = pull(&PathBuf::from("/nonexistent/path/kcl-test-12345"));
+    #[tokio::test]
+    async fn pull_fails_on_nonexistent_path() {
+        let result = pull(&PathBuf::from("/nonexistent/path/kcl-test-12345")).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
@@ -259,8 +265,8 @@ mod tests {
         assert!(!is_git_repo(Path::new("/tmp")));
     }
 
-    #[test]
-    fn checkout_bogus_remote_surfaces_fetch_error() {
+    #[tokio::test]
+    async fn checkout_bogus_remote_surfaces_fetch_error() {
         let tmp = std::env::temp_dir().join("kcl-test-git-checkout-fetch-err");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -270,11 +276,13 @@ mod tests {
             .args(["init", "--initial-branch", "main"])
             .current_dir(&tmp)
             .output()
+            .await
             .unwrap();
         Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(&tmp)
             .output()
+            .await
             .unwrap();
         // Point origin at a bogus URL so fetch fails.
         Command::new("git")
@@ -286,9 +294,10 @@ mod tests {
             ])
             .current_dir(&tmp)
             .output()
+            .await
             .unwrap();
 
-        let result = checkout(&tmp, "nonexistent-branch");
+        let result = checkout(&tmp, "nonexistent-branch").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(

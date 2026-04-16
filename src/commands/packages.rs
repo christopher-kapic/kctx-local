@@ -15,7 +15,7 @@ fn open_db() -> Result<rusqlite::Connection> {
     db::open(&db_path)
 }
 
-pub fn run(command: &PackagesCommand) -> Result<()> {
+pub async fn run(command: &PackagesCommand) -> Result<()> {
     match command {
         PackagesCommand::List { verbose, json } => cmd_list(*verbose, *json),
         PackagesCommand::Add {
@@ -23,15 +23,18 @@ pub fn run(command: &PackagesCommand) -> Result<()> {
             path,
             git,
             branch,
-        } => cmd_add(
-            identifier,
-            path.as_deref(),
-            git.as_deref(),
-            branch.as_deref(),
-        ),
+        } => {
+            cmd_add(
+                identifier,
+                path.as_deref(),
+                git.as_deref(),
+                branch.as_deref(),
+            )
+            .await
+        }
         PackagesCommand::Remove { identifier } => cmd_remove(identifier),
         PackagesCommand::Show { identifier, json } => cmd_show(identifier, *json),
-        PackagesCommand::Pull { identifier, all } => cmd_pull(identifier.as_deref(), *all),
+        PackagesCommand::Pull { identifier, all } => cmd_pull(identifier.as_deref(), *all).await,
         PackagesCommand::Set {
             identifier,
             key,
@@ -82,7 +85,7 @@ fn validate_identifier(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_add(
+async fn cmd_add(
     identifier: &str,
     path: Option<&str>,
     git: Option<&str>,
@@ -117,7 +120,7 @@ fn cmd_add(
             let abs = resolve_and_validate_path(p)?;
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
-                None => git::current_branch(Path::new(&abs)).ok(),
+                None => git::current_branch(Path::new(&abs)).await.ok(),
             };
             (
                 SourceType::Git,
@@ -143,7 +146,7 @@ fn cmd_add(
                     "existing clone at {} was removed; re-cloning (originally registered as `{}`)",
                     existing.path, existing.identifier
                 );
-                if let Err(e) = git::clone(git_url, &pkg_dir, branch) {
+                if let Err(e) = git::clone(git_url, &pkg_dir, branch).await {
                     if pkg_dir.exists() {
                         if let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir) {
                             eprintln!(
@@ -159,7 +162,7 @@ fn cmd_add(
             }
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
-                None => git::current_branch(&pkg_dir).ok(),
+                None => git::current_branch(&pkg_dir).await.ok(),
             };
             (
                 SourceType::Git,
@@ -184,7 +187,7 @@ fn cmd_add(
             }
 
             eprintln!("cloning {} ...", git_url);
-            if let Err(e) = git::clone(git_url, &pkg_dir, branch) {
+            if let Err(e) = git::clone(git_url, &pkg_dir, branch).await {
                 // Clean up partial clone directory so a retry doesn't hit
                 // "clone target already exists".
                 if pkg_dir.exists() {
@@ -204,7 +207,7 @@ fn cmd_add(
             // --branch value or the remote's default).
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
-                None => git::current_branch(&pkg_dir).ok(),
+                None => git::current_branch(&pkg_dir).await.ok(),
             };
 
             (
@@ -361,7 +364,7 @@ fn cmd_show(identifier: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
+async fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
     let conn = open_db()?;
 
     if let Some(id) = identifier {
@@ -376,7 +379,7 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
 
         let repo_path = Path::new(&pkg.path);
         eprintln!("pulling {} ...", pkg.identifier);
-        let msg = git::pull(repo_path)?;
+        let msg = git::pull(repo_path).await?;
         eprintln!("{}: {}", pkg.identifier, msg);
     } else if all {
         // Pull all auto-pull-enabled git packages.
@@ -391,7 +394,7 @@ fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
 
             let repo_path = Path::new(&pkg.path);
             eprintln!("pulling {} ...", pkg.identifier);
-            match git::pull(repo_path) {
+            match git::pull(repo_path).await {
                 Ok(msg) => {
                     eprintln!("{}: {}", pkg.identifier, msg);
                     pulled += 1;

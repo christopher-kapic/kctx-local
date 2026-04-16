@@ -112,7 +112,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
             );
         }
 
-        let current = git::current_branch(repo_path).map_err(|e| {
+        let current = git::current_branch(repo_path).await.map_err(|e| {
             anyhow::anyhow!(
                 "failed to determine current branch for {}: {}",
                 pkg.identifier,
@@ -122,7 +122,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
 
         if current != target_branch {
             eprintln!("checking out {} (was on {}) ...", target_branch, current);
-            git::checkout(repo_path, target_branch)?;
+            git::checkout(repo_path, target_branch).await?;
             Some(current)
         } else {
             // Already on the requested branch — nothing to restore.
@@ -145,7 +145,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     let mut pull_error: Option<String> = None;
     if should_pull && pkg.source_type == SourceType::Git {
         eprintln!("pulling {} ...", pkg.identifier);
-        match git::pull(repo_path) {
+        match git::pull(repo_path).await {
             Ok(msg) => eprintln!("{}: {}", pkg.identifier, msg),
             Err(e) => {
                 let msg = format!("pull failed for {}: {}", pkg.identifier, e);
@@ -258,7 +258,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
 
     // 8. Restore the original branch (if we changed it) and exit with the
     //    harness exit code.
-    restore_branch(repo_path, original_branch.as_deref());
+    restore_branch(repo_path, original_branch.as_deref()).await;
 
     // Exit code semantics:
     //   0 → harness succeeded
@@ -288,12 +288,12 @@ fn write_log_file(pkg_log_dir: &Path, log_path: &Path, log: &ConversationLog) ->
 /// Failures are logged to stderr but never propagated — the harness has
 /// already produced its result and the user shouldn't see a successful
 /// answer turn into a failed exit code just because git was unhappy.
-fn restore_branch(repo_path: &Path, original_branch: Option<&str>) {
+async fn restore_branch(repo_path: &Path, original_branch: Option<&str>) {
     let Some(branch) = original_branch else {
         return;
     };
     eprintln!("restoring branch {} ...", branch);
-    if let Err(e) = git::checkout(repo_path, branch) {
+    if let Err(e) = git::checkout(repo_path, branch).await {
         eprintln!("warning: failed to restore branch {}: {}", branch, e);
     }
 }
