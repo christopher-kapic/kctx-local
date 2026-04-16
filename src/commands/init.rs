@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::CommandFactory;
@@ -258,7 +258,7 @@ fn merge_config(
 }
 
 /// Generate shell completion files for bash, zsh, and fish.
-fn generate_completions(completions_dir: &PathBuf) -> Result<()> {
+fn generate_completions(completions_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(completions_dir).with_context(|| {
         format!(
             "creating completions directory: {}",
