@@ -242,6 +242,8 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     }
 
     // 7. Insert conversation index row into SQLite.
+    //    Best-effort: the user has already received the harness response, so a
+    //    failure to persist the index row should not fail the command.
     let conversation = Conversation {
         id: conv_id,
         package_id: pkg.id.clone(),
@@ -251,7 +253,9 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         log_path: relative_log_path,
         created_at: started_at,
     };
-    conversation.insert(&conn)?;
+    if let Err(e) = conversation.insert(&conn) {
+        eprintln!("warning: failed to record conversation in history: {:#}", e);
+    }
 
     // 8. Restore the original branch (if we changed it) and exit with the
     //    harness exit code.
