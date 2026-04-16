@@ -266,15 +266,25 @@ fn cmd_remove(identifier: &str) -> Result<()> {
             Package::delete(&conn, &pkg.id)?;
 
             // Remove the clone directory if it lives inside the configured
-            // clone_dir (i.e. kcl created it). We use clone_dir/identifier
-            // rather than pkg.path so we never delete a user-managed directory
-            // that was registered via --path.
+            // clone_dir (i.e. kcl created it) AND no surviving package row
+            // still points at that same path. The latter guard matters for
+            // monorepos registered under multiple identifiers: the first
+            // identifier owns the on-disk clone and later ones reuse its
+            // path, so removing any one of them must not orphan the others.
             let config = Config::load_or_default()?;
             let clone_dir = expand_tilde(&config.clone_dir)?;
-            let pkg_clone_dir = clone_dir.join(identifier);
-            if pkg_clone_dir.is_dir() {
-                std::fs::remove_dir_all(&pkg_clone_dir)?;
-                eprintln!("deleted clone {}", pkg_clone_dir.display());
+            let pkg_path = std::path::PathBuf::from(&pkg.path);
+            let inside_clone_dir = pkg_path.starts_with(&clone_dir);
+            let still_referenced = Package::count_by_path(&conn, &pkg.path)? > 0;
+
+            if inside_clone_dir && !still_referenced && pkg_path.is_dir() {
+                std::fs::remove_dir_all(&pkg_path)?;
+                eprintln!("deleted clone {}", pkg_path.display());
+            } else if inside_clone_dir && still_referenced {
+                eprintln!(
+                    "kept clone {} (still referenced by other package(s))",
+                    pkg_path.display()
+                );
             }
 
             // Remove conversation log directory for this package.
@@ -698,6 +708,49 @@ mod tests {
 
         // Clean up the test root.
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn remove_preserves_clone_when_other_package_shares_path() {
+        // Two packages registered for the same monorepo URL end up pointing
+        // at the same on-disk clone. Removing one must not delete the clone
+        // while the other still references it.
+        let conn = db::open_memory().unwrap();
+        let url = "https://github.com/acme/monorepo.git";
+        let shared_path = "/clones/monorepo".to_string();
+
+        let app_a = Package::new(
+            "app-a".to_string(),
+            "app-a".to_string(),
+            SourceType::Git,
+            Some(url.to_string()),
+            Some("main".to_string()),
+            shared_path.clone(),
+            true,
+            None,
+        );
+        app_a.insert(&conn).unwrap();
+
+        let app_b = Package::new(
+            "app-b".to_string(),
+            "app-b".to_string(),
+            SourceType::Git,
+            Some(url.to_string()),
+            Some("main".to_string()),
+            shared_path.clone(),
+            true,
+            None,
+        );
+        app_b.insert(&conn).unwrap();
+
+        // Remove app-a's DB row, then verify a surviving row still references
+        // the path — which is the signal cmd_remove uses to skip disk cleanup.
+        Package::delete(&conn, &app_a.id).unwrap();
+        assert_eq!(Package::count_by_path(&conn, &shared_path).unwrap(), 1);
+
+        // After removing app-b too, no references remain.
+        Package::delete(&conn, &app_b.id).unwrap();
+        assert_eq!(Package::count_by_path(&conn, &shared_path).unwrap(), 0);
     }
 
     #[test]

@@ -148,6 +148,18 @@ impl Package {
         }
     }
 
+    /// Count how many packages are currently registered against a given
+    /// on-disk path. Used during removal to detect when a shared clone
+    /// directory is still referenced by other packages.
+    pub fn count_by_path(conn: &Connection, path: &str) -> Result<usize> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM packages WHERE path = ?1",
+            params![path],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// List all registered packages, ordered by identifier.
     pub fn list_all(conn: &Connection) -> Result<Vec<Self>> {
         let mut stmt = conn.prepare(
