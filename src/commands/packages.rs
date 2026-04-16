@@ -162,7 +162,20 @@ fn cmd_add(
             }
 
             eprintln!("cloning {} ...", git_url);
-            git::clone(git_url, &pkg_dir, branch)?;
+            if let Err(e) = git::clone(git_url, &pkg_dir, branch) {
+                // Clean up partial clone directory so a retry doesn't hit
+                // "clone target already exists".
+                if pkg_dir.exists() {
+                    if let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir) {
+                        eprintln!(
+                            "warning: failed to clean up partial clone at {}: {}",
+                            pkg_dir.display(),
+                            cleanup_err
+                        );
+                    }
+                }
+                return Err(e);
+            }
             eprintln!("cloned to {}", pkg_dir.display());
 
             // Record the actual branch we ended up on (either the explicit
