@@ -93,6 +93,30 @@ pub fn build_args(harness: &HarnessConfig, prompt: &str, model: Option<&str>) ->
     args
 }
 
+/// Kill a harness subprocess and all processes in its group, then reap.
+///
+/// On Unix, sends SIGKILL to the entire process group (the child was spawned
+/// with `process_group(0)` so it leads its own group). Falls back to killing
+/// just the child on non-Unix or if the group kill fails.
+async fn kill_and_reap(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // Safety: sending a signal to a process group is a well-defined POSIX operation.
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill().await;
+    }
+
+    let _ = child.wait().await;
+}
+
 /// Spawn a harness subprocess, stream its output in real-time, and return
 /// the captured output and exit code.
 ///
@@ -116,12 +140,17 @@ pub async fn run_harness(
         PromptMode::Arg => Stdio::null(),
     };
 
-    let mut child = Command::new(&harness.command)
-        .args(&args)
+    let mut cmd = Command::new(&harness.command);
+    cmd.args(&args)
         .current_dir(cwd)
         .stdin(stdin_cfg)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning harness command: {}", harness.command))?;
 
@@ -204,8 +233,7 @@ pub async fn run_harness(
                 }
             }
             _ = &mut timeout => {
-                // Kill the subprocess on timeout
-                let _ = child.kill().await;
+                kill_and_reap(&mut child).await;
                 bail!(
                     "harness timed out after {} seconds",
                     timeout_secs
