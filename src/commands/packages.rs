@@ -109,11 +109,11 @@ fn cmd_add(
     let (source_type, source_url, source_branch, resolved_path, auto_pull) = if let Some(git_url) =
         git
     {
+        // Validate URL structurally for all git cases — fresh clones would
+        // otherwise only fail inside git, and --path clones never run git.
+        git::validate_git_url(git_url)?;
         // Git package — may or may not have an explicit --path.
         if let Some(p) = path {
-            // Existing clone with remote tracking. Validate URL structurally
-            // since git clone won't run to catch bad URLs.
-            git::validate_git_url(git_url)?;
             let abs = resolve_and_validate_path(p)?;
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
