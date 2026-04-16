@@ -17,6 +17,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     // Enable foreign key enforcement (off by default in SQLite).
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "busy_timeout", 5000)?;
 
     migrate(&conn)?;
 
@@ -28,6 +29,7 @@ pub fn open(path: &Path) -> Result<Connection> {
 pub fn open_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory().context("could not open in-memory database")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "busy_timeout", 5000)?;
     migrate(&conn)?;
     Ok(conn)
 }
@@ -102,6 +104,15 @@ mod tests {
         let conn = open_memory().unwrap();
         // Running migrate again should not fail.
         migrate(&conn).unwrap();
+    }
+
+    #[test]
+    fn busy_timeout_set() {
+        let conn = open_memory().unwrap();
+        let timeout: i32 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000);
     }
 
     #[test]
