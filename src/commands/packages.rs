@@ -200,11 +200,11 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
 
 /// Resolve a path to absolute form and validate it exists as a directory.
 fn resolve_and_validate_path(p: &str) -> Result<String> {
-    let path = Path::new(p);
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
+    let expanded = expand_tilde(p);
+    let abs = if expanded.is_absolute() {
+        expanded
     } else {
-        std::env::current_dir()?.join(path)
+        std::env::current_dir()?.join(expanded)
     };
 
     if !abs.exists() {
@@ -542,6 +542,13 @@ mod tests {
         assert!(parsed.is_array());
         assert_eq!(parsed.as_array().unwrap().len(), 1);
         assert_eq!(parsed[0]["identifier"], "testpkg");
+    }
+
+    #[test]
+    fn resolve_expands_tilde_prefix() {
+        let result = resolve_and_validate_path("~").unwrap();
+        let home = ::dirs::home_dir().unwrap();
+        assert_eq!(result, home.to_string_lossy());
     }
 
     #[test]
