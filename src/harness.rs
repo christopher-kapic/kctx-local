@@ -150,15 +150,25 @@ async fn kill_and_reap(child: &mut tokio::process::Child) {
     {
         if let Some(pid) = child.id() {
             // Safety: sending a signal to a process group is a well-defined POSIX operation.
-            unsafe {
-                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            let ret = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+            if ret == -1 {
+                let err = std::io::Error::last_os_error();
+                // ESRCH means the process group already exited — not worth reporting.
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    eprintln!(
+                        "warning: failed to kill harness process group (pid {}): {}",
+                        pid, err
+                    );
+                }
             }
         }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = child.kill().await;
+        if let Err(e) = child.kill().await {
+            eprintln!("warning: failed to kill harness process: {}", e);
+        }
     }
 
     let _ = child.wait().await;
