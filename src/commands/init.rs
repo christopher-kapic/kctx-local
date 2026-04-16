@@ -76,19 +76,18 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
             HarnessConfig {
                 command: "codex".to_string(),
                 // codex's non-interactive entrypoint is the `exec`
-                // subcommand. Prompt is a positional arg. The extra
-                // flags are the recommended headless defaults:
+                // subcommand. Prompt is a positional arg.
                 // `--skip-git-repo-check` allows running outside a git
-                // repo, `--ephemeral` avoids persisting session files,
-                // and `approval_policy=never` disables approval prompts
-                // so codex won't block on tool use.
+                // repo; `--ephemeral` avoids persisting session files.
+                // `codex exec` already defaults to `AskForApproval::Never`
+                // in headless mode (see codex-rs/exec/src/lib.rs ~L370 and
+                // codex-rs/exec/src/cli.rs), so no approval-policy override
+                // is needed.
                 args: vec![
                     "exec".to_string(),
                     "{prompt}".to_string(),
                     "--skip-git-repo-check".to_string(),
                     "--ephemeral".to_string(),
-                    "-c".to_string(),
-                    "approval_policy=never".to_string(),
                 ],
                 prompt_mode: PromptMode::Arg,
                 // codex accepts `-m <model>` / `--model <model>`.
@@ -401,7 +400,9 @@ mod tests {
         assert!(codex.args.contains(&"{prompt}".to_string()));
         assert!(codex.args.contains(&"--skip-git-repo-check".to_string()));
         assert!(codex.args.contains(&"--ephemeral".to_string()));
-        assert!(codex.args.contains(&"approval_policy=never".to_string()));
+        // `codex exec` already defaults to AskForApproval::Never in headless
+        // mode, so we deliberately do NOT pass `-c approval_policy=...`.
+        assert!(!codex.args.contains(&"approval_policy=never".to_string()));
         assert!(!codex.args.contains(&"--full-auto".to_string()));
     }
 
