@@ -180,7 +180,9 @@ pub async fn run_harness(
             .write_all(prompt.as_bytes())
             .await
             .context("writing prompt to harness stdin")?;
-        // Drop stdin to close it, signaling EOF
+        // Explicitly drop stdin to close the pipe and signal EOF to the child;
+        // without this the harness may block waiting for more input.
+        drop(stdin);
     }
 
     let stdout_pipe = child.stdout.take().expect("stdout should be piped");
