@@ -54,7 +54,7 @@ fn migrate(conn: &Connection) -> Result<()> {
                 display_name    TEXT NOT NULL,
                 source_type     TEXT NOT NULL,
                 source_url      TEXT,
-                source_branch   TEXT DEFAULT 'main',
+                source_branch   TEXT DEFAULT NULL,
                 path            TEXT NOT NULL,
                 auto_pull       INTEGER NOT NULL DEFAULT 0,
                 harness         TEXT,
