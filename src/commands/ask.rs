@@ -269,7 +269,10 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
             }
         }
         Err(e) => {
-            eprintln!("warning: failed to reopen database to record conversation: {:#}", e);
+            eprintln!(
+                "warning: failed to reopen database to record conversation: {:#}",
+                e
+            );
         }
     }
 

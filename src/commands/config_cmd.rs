@@ -199,9 +199,8 @@ fn apply_set(path: &Path, key: &str, value: &str) -> Result<()> {
                     harness.args = if value.is_empty() {
                         Vec::new()
                     } else {
-                        shlex::split(value).with_context(|| {
-                            format!("failed to parse args value `{}`", value)
-                        })?
+                        shlex::split(value)
+                            .with_context(|| format!("failed to parse args value `{}`", value))?
                     };
                 }
                 "default_model" => {
@@ -292,9 +291,7 @@ fn acquire_config_lock(config_path: &Path) -> Result<std::fs::File> {
 }
 
 fn config_lock_path(config_path: &Path) -> PathBuf {
-    let parent = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
     let filename = config_path
         .file_name()
         .and_then(|n| n.to_str())
