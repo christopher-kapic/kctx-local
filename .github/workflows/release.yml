@@ -28,8 +28,8 @@ jobs:
       - name: Check for version change
         id: version
         run: |
-          current="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-          previous="$(git show HEAD~1:Cargo.toml | grep '^version' | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          current="$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          previous="$(git show HEAD~1:Cargo.toml | grep '^version = ' | head -1 | sed 's/.*"\(.*\)".*/\1/')"
           echo "current=${current}" >> "$GITHUB_OUTPUT"
           if [ "$current" != "$previous" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
