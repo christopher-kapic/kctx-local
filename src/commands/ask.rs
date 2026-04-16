@@ -26,6 +26,8 @@ struct ConversationLog {
     finished_at: String,
     exit_code: Option<i32>,
     response: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull_error: Option<String>,
 }
 
 /// Arguments for a single `kcl ask` invocation.
@@ -140,11 +142,16 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     } else {
         pkg.auto_pull && pkg.source_type == SourceType::Git
     };
+    let mut pull_error: Option<String> = None;
     if should_pull && pkg.source_type == SourceType::Git {
         eprintln!("pulling {} ...", pkg.identifier);
         match git::pull(repo_path) {
             Ok(msg) => eprintln!("{}: {}", pkg.identifier, msg),
-            Err(e) => eprintln!("warning: pull failed for {}: {}", pkg.identifier, e),
+            Err(e) => {
+                let msg = format!("pull failed for {}: {}", pkg.identifier, e);
+                eprintln!("warning: {}", msg);
+                pull_error = Some(msg);
+            }
         }
     }
 
@@ -222,6 +229,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         finished_at: finished_at.to_rfc3339(),
         exit_code,
         response: response_text,
+        pull_error,
     };
 
     let log_path = pkg_log_dir.join(&log_filename);
@@ -292,6 +300,7 @@ mod tests {
             finished_at: "2026-04-07T10:30:45+00:00".to_string(),
             exit_code: Some(0),
             response: "Routing in axum uses...".to_string(),
+            pull_error: None,
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -319,6 +328,7 @@ mod tests {
             finished_at: "2026-04-07T10:30:45+00:00".to_string(),
             exit_code: None,
             response: "output".to_string(),
+            pull_error: None,
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -377,6 +387,7 @@ mod tests {
             finished_at: "2026-04-07T10:30:05+00:00".to_string(),
             exit_code: None,
             response: "[error] harness timed out after 120s".to_string(),
+            pull_error: None,
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -417,6 +428,59 @@ mod tests {
             .expect("failed conversation should be persisted");
         assert_eq!(retrieved.exit_code, None);
         assert_eq!(retrieved.question, "question that fails");
+    }
+
+    #[test]
+    fn conversation_log_records_pull_error() {
+        let log = ConversationLog {
+            id: "pull-err-1".to_string(),
+            package_id: "pkg-uuid".to_string(),
+            package_identifier: "axum".to_string(),
+            question: "How does routing work?".to_string(),
+            harness: "claude".to_string(),
+            model: None,
+            started_at: "2026-04-07T10:30:00+00:00".to_string(),
+            finished_at: "2026-04-07T10:30:45+00:00".to_string(),
+            exit_code: Some(0),
+            response: "Routing in axum uses...".to_string(),
+            pull_error: Some("pull failed for axum: remote unreachable".to_string()),
+        };
+
+        let json = serde_json::to_string_pretty(&log).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed["pull_error"].as_str().unwrap(),
+            "pull failed for axum: remote unreachable"
+        );
+
+        // Round-trips cleanly.
+        let reparsed: ConversationLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            reparsed.pull_error.as_deref(),
+            Some("pull failed for axum: remote unreachable")
+        );
+    }
+
+    #[test]
+    fn conversation_log_omits_pull_error_when_none() {
+        let log = ConversationLog {
+            id: "no-pull-err".to_string(),
+            package_id: "pkg-uuid".to_string(),
+            package_identifier: "axum".to_string(),
+            question: "q".to_string(),
+            harness: "claude".to_string(),
+            model: None,
+            started_at: "2026-04-07T10:30:00+00:00".to_string(),
+            finished_at: "2026-04-07T10:30:01+00:00".to_string(),
+            exit_code: Some(0),
+            response: "ok".to_string(),
+            pull_error: None,
+        };
+
+        let json = serde_json::to_string_pretty(&log).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("pull_error").is_none());
     }
 
     #[test]

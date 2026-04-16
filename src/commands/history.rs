@@ -137,6 +137,9 @@ fn run_show(id: &str, json: bool) -> Result<()> {
                     .unwrap_or_else(|| "N/A".to_string())
             );
             println!("Time:      {}", conv.created_at.to_rfc3339());
+            if let Some(pull_err) = parsed.get("pull_error").and_then(|v| v.as_str()) {
+                println!("Pull:      warning: {}", pull_err);
+            }
             println!("---");
             println!("{}", response);
         } else {
