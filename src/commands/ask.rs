@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::db;
-use crate::dirs;
+use crate::paths;
 use crate::git;
 use crate::harness;
 use crate::models::conversation::Conversation;
@@ -56,7 +56,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     } = args;
 
     // 1. Open DB and look up package.
-    let db_path = dirs::db_file()?;
+    let db_path = paths::db_file()?;
     let conn = db::open(&db_path)?;
 
     let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
@@ -199,7 +199,7 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     let log_filename = format!("{}-{}.json", timestamp, short_id);
     let relative_log_path = format!("{}/{}", pkg.identifier, log_filename);
 
-    let log_dir = dirs::log_dir()?;
+    let log_dir = paths::log_dir()?;
     let pkg_log_dir = log_dir.join(&pkg.identifier);
     std::fs::create_dir_all(&pkg_log_dir)?;
 

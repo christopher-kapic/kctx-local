@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::cli::HistoryCommand;
 use crate::db;
-use crate::dirs;
+use crate::paths;
 use crate::models::conversation::Conversation;
 use crate::models::package::Package;
 
@@ -42,7 +42,7 @@ pub fn run(command: &HistoryCommand) -> Result<()> {
 }
 
 fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Result<()> {
-    let db_path = dirs::db_file()?;
+    let db_path = paths::db_file()?;
     let conn = db::open(&db_path)?;
 
     let pkg = Package::get_by_identifier(&conn, identifier)?.ok_or_else(|| {
@@ -90,7 +90,7 @@ fn run_list(identifier: &str, since: Option<u32>, limit: u32, json: bool) -> Res
 }
 
 fn run_show(id: &str, json: bool) -> Result<()> {
-    let db_path = dirs::db_file()?;
+    let db_path = paths::db_file()?;
     let conn = db::open(&db_path)?;
 
     let conv = Conversation::get_by_id(&conn, id)?
@@ -102,7 +102,7 @@ fn run_show(id: &str, json: bool) -> Result<()> {
         })?;
 
     // Resolve the full log path.
-    let log_dir = dirs::log_dir()?;
+    let log_dir = paths::log_dir()?;
     let log_path = log_dir.join(&conv.log_path);
 
     if !log_path.exists() {

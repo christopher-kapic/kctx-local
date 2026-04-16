@@ -128,7 +128,7 @@ impl Config {
     /// Load config from the default config file location.
     /// Returns the default config if the file doesn't exist.
     pub fn load_or_default() -> Result<Self> {
-        let path = crate::dirs::config_file()?;
+        let path = crate::paths::config_file()?;
         if path.exists() {
             Self::load(&path)
         } else {

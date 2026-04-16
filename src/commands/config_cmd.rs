@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::ConfigCommand;
 use crate::config::Config;
-use crate::dirs;
+use crate::paths;
 
 pub fn run(command: &ConfigCommand) -> Result<()> {
     match command {
@@ -14,7 +14,7 @@ pub fn run(command: &ConfigCommand) -> Result<()> {
 }
 
 fn cmd_show() -> Result<()> {
-    let path = dirs::config_file()?;
+    let path = paths::config_file()?;
     if !path.exists() {
         bail!(
             "No config file found at {}. Run `kcl init` to create one.",
@@ -29,7 +29,7 @@ fn cmd_show() -> Result<()> {
 }
 
 fn cmd_edit() -> Result<()> {
-    let path = dirs::config_file()?;
+    let path = paths::config_file()?;
     if !path.exists() {
         bail!(
             "No config file found at {}. Run `kcl init` to create one.",
@@ -50,7 +50,7 @@ fn cmd_edit() -> Result<()> {
 }
 
 fn cmd_set(key: &str, value: &str) -> Result<()> {
-    let path = dirs::config_file()?;
+    let path = paths::config_file()?;
     if !path.exists() {
         bail!(
             "No config file found at {}. Run `kcl init` to create one.",
@@ -136,7 +136,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
 }
 
 fn cmd_path() -> Result<()> {
-    let path = dirs::config_file()?;
+    let path = paths::config_file()?;
     println!("{}", path.display());
     Ok(())
 }

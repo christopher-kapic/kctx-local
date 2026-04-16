@@ -297,7 +297,7 @@ pub fn run(non_interactive: bool) -> Result<()> {
     let harness_map = build_harness_map(&detected);
 
     // 5. Load or create config, merging if it already exists
-    let config_path = crate::dirs::config_file()?;
+    let config_path = crate::paths::config_file()?;
     let config_existed = config_path.exists();
 
     let mut config = if config_existed {
@@ -325,11 +325,11 @@ pub fn run(non_interactive: bool) -> Result<()> {
     config.save(&config_path)?;
 
     // 6. Create database with schema
-    let db_path = crate::dirs::db_file()?;
+    let db_path = crate::paths::db_file()?;
     let _conn = crate::db::open(&db_path)?;
 
     // 7. Generate shell completions
-    let completions_dir = crate::dirs::config_dir()?.join("completions");
+    let completions_dir = crate::paths::config_dir()?.join("completions");
     generate_completions(&completions_dir)?;
 
     // 8. Print summary

@@ -2,7 +2,7 @@ mod cli;
 mod commands;
 mod config;
 mod db;
-mod dirs;
+mod paths;
 mod git;
 mod harness;
 mod models;

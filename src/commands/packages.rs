@@ -5,13 +5,13 @@ use anyhow::{Result, bail};
 use crate::cli::PackagesCommand;
 use crate::config::Config;
 use crate::db;
-use crate::dirs;
+use crate::paths;
 use crate::git;
 use crate::models::package::{Package, SourceType};
 
 /// Helper to open the database from the default location.
 fn open_db() -> Result<rusqlite::Connection> {
-    let db_path = dirs::db_file()?;
+    let db_path = paths::db_file()?;
     db::open(&db_path)
 }
 
@@ -209,11 +209,11 @@ fn cmd_add(
 /// cannot be determined (e.g. in minimal container environments).
 fn expand_tilde(path: &str) -> Result<std::path::PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
-        let home = ::dirs::home_dir()
+        let home = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("cannot expand '~': home directory not found"))?;
         Ok(home.join(rest))
     } else if path == "~" {
-        let home = ::dirs::home_dir()
+        let home = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("cannot expand '~': home directory not found"))?;
         Ok(home)
     } else {
@@ -265,7 +265,7 @@ fn cmd_remove(identifier: &str) -> Result<()> {
             }
 
             // Remove conversation log directory for this package.
-            let log_dir = dirs::log_dir()?;
+            let log_dir = paths::log_dir()?;
             let pkg_log_dir = log_dir.join(identifier);
             if pkg_log_dir.is_dir() {
                 std::fs::remove_dir_all(&pkg_log_dir)?;
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn resolve_expands_tilde_prefix() {
         let result = resolve_and_validate_path("~").unwrap();
-        let home = ::dirs::home_dir().unwrap();
+        let home = dirs::home_dir().unwrap();
         assert_eq!(result, home.to_string_lossy());
     }
 
@@ -692,14 +692,14 @@ mod tests {
     #[test]
     fn expand_tilde_expands_home_prefix() {
         let result = expand_tilde("~/projects").unwrap();
-        let home = ::dirs::home_dir().unwrap();
+        let home = dirs::home_dir().unwrap();
         assert_eq!(result, home.join("projects"));
     }
 
     #[test]
     fn expand_tilde_expands_bare_tilde() {
         let result = expand_tilde("~").unwrap();
-        let home = ::dirs::home_dir().unwrap();
+        let home = dirs::home_dir().unwrap();
         assert_eq!(result, home);
     }
 
