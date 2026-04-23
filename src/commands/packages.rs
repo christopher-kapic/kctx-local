@@ -147,14 +147,14 @@ async fn cmd_add(
                     existing.path, existing.identifier
                 );
                 if let Err(e) = git::clone(git_url, &pkg_dir, branch).await {
-                    if pkg_dir.exists() {
-                        if let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir) {
-                            eprintln!(
-                                "warning: failed to clean up partial clone at {}: {}",
-                                pkg_dir.display(),
-                                cleanup_err
-                            );
-                        }
+                    if pkg_dir.exists()
+                        && let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir)
+                    {
+                        eprintln!(
+                            "warning: failed to clean up partial clone at {}: {}",
+                            pkg_dir.display(),
+                            cleanup_err
+                        );
                     }
                     return Err(e);
                 }
@@ -190,14 +190,14 @@ async fn cmd_add(
             if let Err(e) = git::clone(git_url, &pkg_dir, branch).await {
                 // Clean up partial clone directory so a retry doesn't hit
                 // "clone target already exists".
-                if pkg_dir.exists() {
-                    if let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir) {
-                        eprintln!(
-                            "warning: failed to clean up partial clone at {}: {}",
-                            pkg_dir.display(),
-                            cleanup_err
-                        );
-                    }
+                if pkg_dir.exists()
+                    && let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir)
+                {
+                    eprintln!(
+                        "warning: failed to clean up partial clone at {}: {}",
+                        pkg_dir.display(),
+                        cleanup_err
+                    );
                 }
                 return Err(e);
             }

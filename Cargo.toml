@@ -1,8 +1,8 @@
 [package]
 name = "kcl"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 description = "Local Code Knowledge CLI — instant Q&A access to any codebase"
 license = "MIT"
 
@@ -13,11 +13,11 @@ clap = { version = "4", features = ["derive", "wrap_help"] }
 clap_complete = "4"
 dirs = "6"
 libc = "0.2"
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 shlex = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "signal"] }
 uuid = { version = "1", features = ["v4"] }
-which = "7"
+which = "8"
