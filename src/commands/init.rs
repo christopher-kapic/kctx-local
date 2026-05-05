@@ -136,37 +136,49 @@ fn detect_harnesses() -> Vec<String> {
         .collect()
 }
 
-/// Select the default harness based on what was detected.
-/// Returns (selected_name, was_user_prompted).
-fn select_default_harness(detected: &[String], non_interactive: bool) -> Result<String> {
+/// Select the default harness based on what was detected. When `existing_default`
+/// is provided and matches a detected harness, it becomes the proposed default
+/// in the prompt; otherwise the first detected harness is proposed.
+fn select_default_harness(
+    detected: &[String],
+    non_interactive: bool,
+    existing_default: Option<&str>,
+) -> Result<String> {
+    let existing_idx =
+        existing_default.and_then(|d| detected.iter().position(|n| n == d));
+
     match detected.len() {
         0 => {
-            eprintln!("Warning: no known harnesses found in PATH. Defaulting to `claude`.");
+            let fallback = existing_default.unwrap_or("claude");
+            eprintln!(
+                "Warning: no known harnesses found in PATH. Defaulting to `{}`.",
+                fallback
+            );
             eprintln!(
                 "Install a supported harness or configure one manually with `kcl config set`."
             );
-            Ok("claude".to_string())
+            Ok(fallback.to_string())
         }
         1 => {
             eprintln!("Auto-selected harness: {}", detected[0]);
             Ok(detected[0].clone())
         }
         _ => {
+            let suggested_idx = existing_idx.unwrap_or(0);
             if non_interactive {
-                // Pick first detected
+                let chosen = &detected[suggested_idx];
                 eprintln!(
                     "Multiple harnesses found: {}. Auto-selecting `{}`.",
                     detected.join(", "),
-                    detected[0]
+                    chosen
                 );
-                Ok(detected[0].clone())
+                Ok(chosen.clone())
             } else {
-                // Prompt user
                 eprintln!("Multiple harnesses found:");
                 for (i, name) in detected.iter().enumerate() {
                     eprintln!("  [{}] {}", i + 1, name);
                 }
-                eprint!("Select default harness [1]: ");
+                eprint!("Select default harness [{}]: ", suggested_idx + 1);
                 io::stderr().flush()?;
 
                 let stdin = io::stdin();
@@ -177,7 +189,7 @@ fn select_default_harness(detected: &[String], non_interactive: bool) -> Result<
                 };
 
                 if input.is_empty() {
-                    Ok(detected[0].clone())
+                    Ok(detected[suggested_idx].clone())
                 } else {
                     let idx: usize = input
                         .parse::<usize>()
@@ -191,9 +203,10 @@ fn select_default_harness(detected: &[String], non_interactive: bool) -> Result<
     }
 }
 
-/// Prompt user for clone directory (or use default in non-interactive mode).
-fn get_clone_dir(non_interactive: bool) -> Result<String> {
-    let default_dir = "~/src/kcl-packages";
+/// Prompt user for clone directory. The proposed default is `existing` when
+/// provided, otherwise the built-in default.
+fn get_clone_dir(non_interactive: bool, existing: Option<&str>) -> Result<String> {
+    let default_dir = existing.unwrap_or("~/src/kcl-packages");
 
     if non_interactive {
         return Ok(default_dir.to_string());
@@ -237,26 +250,22 @@ fn build_harness_map(detected: &[String]) -> HashMap<String, HarnessConfig> {
     map
 }
 
-/// Merge new harness entries into an existing config without overwriting.
+/// Merge new harness entries into an existing config. `clone_dir` and
+/// `default_harness` are taken as the user's chosen values (the caller is
+/// expected to have proposed the existing config's values as defaults during
+/// the prompt). New harness templates are added without clobbering any
+/// existing entries the user may have customized.
 fn merge_config(
     existing: &mut Config,
     new_harnesses: HashMap<String, HarnessConfig>,
     clone_dir: &str,
     default_harness: &str,
 ) {
-    // Only update clone_dir if it's still the default (hasn't been customized)
-    if existing.clone_dir == "~/src/kcl-packages" {
-        existing.clone_dir = clone_dir.to_string();
-    }
+    existing.clone_dir = clone_dir.to_string();
+    existing.default_harness = default_harness.to_string();
 
-    // Add new harnesses that don't already exist
     for (name, config) in new_harnesses {
         existing.harnesses.entry(name).or_insert(config);
-    }
-
-    // Only update default harness if not already set to a valid harness
-    if !existing.harnesses.contains_key(&existing.default_harness) {
-        existing.default_harness = default_harness.to_string();
     }
 }
 
@@ -287,43 +296,56 @@ fn generate_completions(completions_dir: &Path) -> Result<()> {
 }
 
 pub fn run(non_interactive: bool) -> Result<()> {
+    // Load the existing config first (if any) so its values can be proposed
+    // as defaults during the prompts.
+    let config_path = crate::paths::config_file()?;
+    let config_existed = config_path.exists();
+    let existing_config = if config_existed {
+        Some(Config::load(&config_path)?)
+    } else {
+        None
+    };
+
     // 1. Detect harnesses
     let detected = detect_harnesses();
 
-    // 2. Select default harness
-    let default_harness = select_default_harness(&detected, non_interactive)?;
+    // 2. Select default harness (existing default biases the prompt)
+    let default_harness = select_default_harness(
+        &detected,
+        non_interactive,
+        existing_config.as_ref().map(|c| c.default_harness.as_str()),
+    )?;
 
-    // 3. Get clone directory
-    let clone_dir = get_clone_dir(non_interactive)?;
+    // 3. Get clone directory (existing value biases the prompt)
+    let clone_dir = get_clone_dir(
+        non_interactive,
+        existing_config.as_ref().map(|c| c.clone_dir.as_str()),
+    )?;
 
     // 4. Build harness map
     let harness_map = build_harness_map(&detected);
 
-    // 5. Load or create config, merging if it already exists
-    let config_path = crate::paths::config_file()?;
-    let config_existed = config_path.exists();
-
-    let mut config = if config_existed {
-        Config::load(&config_path)?
-    } else {
-        Config::default()
-    };
-
-    if config_existed {
+    // 5. Apply choices to config — preserving prior harness customizations.
+    let config = if let Some(existing) = existing_config {
         let new_harness_names: Vec<String> = harness_map
             .keys()
-            .filter(|k| !config.harnesses.contains_key(*k))
+            .filter(|k| !existing.harnesses.contains_key(*k))
             .cloned()
             .collect();
+        let mut config = existing;
         merge_config(&mut config, harness_map, &clone_dir, &default_harness);
         if !new_harness_names.is_empty() {
             eprintln!("Merged new harnesses: {}", new_harness_names.join(", "));
         }
+        config
     } else {
-        config.clone_dir = clone_dir.clone();
-        config.default_harness = default_harness.clone();
-        config.harnesses = harness_map;
-    }
+        Config {
+            clone_dir,
+            default_harness,
+            harnesses: harness_map,
+            ..Config::default()
+        }
+    };
 
     config.save(&config_path)?;
 
@@ -436,22 +458,57 @@ mod tests {
     #[test]
     fn select_default_none_detected() {
         let detected: Vec<String> = vec![];
-        let result = select_default_harness(&detected, true).unwrap();
+        let result = select_default_harness(&detected, true, None).unwrap();
         assert_eq!(result, "claude");
+    }
+
+    #[test]
+    fn select_default_none_detected_uses_existing() {
+        let detected: Vec<String> = vec![];
+        let result = select_default_harness(&detected, true, Some("opencode")).unwrap();
+        assert_eq!(result, "opencode");
     }
 
     #[test]
     fn select_default_one_detected() {
         let detected = vec!["opencode".to_string()];
-        let result = select_default_harness(&detected, true).unwrap();
+        let result = select_default_harness(&detected, true, None).unwrap();
         assert_eq!(result, "opencode");
     }
 
     #[test]
     fn select_default_multiple_non_interactive() {
         let detected = vec!["claude".to_string(), "copilot".to_string()];
-        let result = select_default_harness(&detected, true).unwrap();
+        let result = select_default_harness(&detected, true, None).unwrap();
         assert_eq!(result, "claude");
+    }
+
+    #[test]
+    fn select_default_multiple_prefers_existing_when_detected() {
+        let detected = vec!["claude".to_string(), "copilot".to_string()];
+        let result =
+            select_default_harness(&detected, true, Some("copilot")).unwrap();
+        assert_eq!(result, "copilot");
+    }
+
+    #[test]
+    fn select_default_multiple_falls_back_when_existing_not_detected() {
+        let detected = vec!["claude".to_string(), "copilot".to_string()];
+        let result =
+            select_default_harness(&detected, true, Some("nonexistent")).unwrap();
+        assert_eq!(result, "claude");
+    }
+
+    #[test]
+    fn get_clone_dir_non_interactive_uses_existing() {
+        let result = get_clone_dir(true, Some("/my/custom/dir")).unwrap();
+        assert_eq!(result, "/my/custom/dir");
+    }
+
+    #[test]
+    fn get_clone_dir_non_interactive_falls_back_to_default() {
+        let result = get_clone_dir(true, None).unwrap();
+        assert_eq!(result, "~/src/kcl-packages");
     }
 
     #[test]
@@ -519,19 +576,19 @@ mod tests {
 
         merge_config(&mut existing, new_harnesses, "~/new-dir", "opencode");
 
-        // Should NOT overwrite existing claude entry
+        // Existing claude entry must be preserved (user's customization).
         assert_eq!(existing.harnesses["claude"].command, "claude");
-        // Should add new opencode entry
+        // New opencode template should be added.
         assert!(existing.harnesses.contains_key("opencode"));
         assert_eq!(existing.harnesses["opencode"].command, "opencode");
-        // Should NOT overwrite custom clone_dir
-        assert_eq!(existing.clone_dir, "/custom/dir");
-        // default_harness should stay since claude is a valid key
-        assert_eq!(existing.default_harness, "claude");
+        // clone_dir reflects the user's choice from the prompt.
+        assert_eq!(existing.clone_dir, "~/new-dir");
+        // default_harness reflects the user's choice from the prompt.
+        assert_eq!(existing.default_harness, "opencode");
     }
 
     #[test]
-    fn merge_config_updates_default_if_invalid() {
+    fn merge_config_applies_chosen_default_harness() {
         let mut existing = Config {
             clone_dir: "~/src/kcl-packages".to_string(),
             default_harness: "nonexistent".to_string(),
@@ -605,7 +662,7 @@ mod tests {
 
         // Build config
         let detected = detect_harnesses();
-        let default_harness = select_default_harness(&detected, true).unwrap();
+        let default_harness = select_default_harness(&detected, true, None).unwrap();
         let harness_map = build_harness_map(&detected);
 
         let config = Config {
@@ -683,16 +740,18 @@ mod tests {
             },
         );
 
-        merge_config(&mut loaded, new_harnesses, "~/src/kcl-packages", "claude");
+        // Simulate the second init accepting the proposed defaults from the
+        // prompt — i.e. the existing clone_dir flows back through.
+        merge_config(&mut loaded, new_harnesses, "/my/custom/dir", "claude");
         loaded.save(&config_path).unwrap();
 
         // Verify merge behavior
         let final_config = Config::load(&config_path).unwrap();
-        // Existing claude should NOT be overwritten
+        // Existing claude harness customization should NOT be overwritten.
         assert_eq!(final_config.harnesses["claude"].command, "my-custom-claude");
-        // New opencode should be added
+        // New opencode should be added.
         assert!(final_config.harnesses.contains_key("opencode"));
-        // Custom clone_dir should be preserved
+        // clone_dir is preserved because the user accepted the proposed default.
         assert_eq!(final_config.clone_dir, "/my/custom/dir");
 
         let _ = std::fs::remove_dir_all(&tmp);
