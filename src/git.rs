@@ -42,7 +42,18 @@ pub async fn clone(url: &str, target_dir: &Path, branch: Option<&str>) -> Result
 
 /// Pull latest changes for a repository at the given path.
 ///
-/// Shells out to `git -C <path> pull`.
+/// Strictly fast-forward only. Refuses to merge or rebase; if the local
+/// branch has diverged from its upstream, returns an error telling the
+/// user to resolve manually.
+///
+/// Implementation:
+/// 1. Determine the current branch (skip if `HEAD` is detached).
+/// 2. Look up its upstream via `git rev-parse --abbrev-ref @{u}` (skip if
+///    no upstream is configured).
+/// 3. `git fetch` from the configured upstream.
+/// 4. `git merge --ff-only @{u}`.
+///
+/// Returns a human-readable summary of what happened.
 pub async fn pull(repo_path: &Path) -> Result<String> {
     check_git()?;
 
@@ -50,23 +61,109 @@ pub async fn pull(repo_path: &Path) -> Result<String> {
         bail!("repository path does not exist: {}", repo_path.display());
     }
 
-    let output = Command::new("git")
+    // Determine current branch; skip if detached.
+    let branch = match current_head(repo_path).await? {
+        HeadState::Branch(name) => name,
+        HeadState::Detached(_) => {
+            return Ok("skipping pull: HEAD is detached".to_string());
+        }
+    };
+
+    // Look up the configured upstream of the current branch. If there is no
+    // upstream, this fails — treat it as a no-op skip rather than an error.
+    let upstream_out = Command::new("git")
         .arg("-C")
         .arg(repo_path)
-        .arg("pull")
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("--symbolic-full-name")
+        .arg("@{u}")
         .output()
         .await
-        .context("failed to execute git pull")?;
+        .context("failed to execute git rev-parse")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !upstream_out.status.success() {
+        return Ok(format!("`{branch}` has no upstream; skipping pull"));
+    }
+    let upstream = String::from_utf8_lossy(&upstream_out.stdout)
+        .trim()
+        .to_string();
 
-    if !output.status.success() {
-        bail!("git pull failed: {}", stderr.trim());
+    // Capture the SHA before the fetch+merge so we can report what changed.
+    let before_out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .await
+        .context("failed to execute git rev-parse HEAD")?;
+    if !before_out.status.success() {
+        let stderr = String::from_utf8_lossy(&before_out.stderr);
+        bail!("git rev-parse HEAD failed: {}", stderr.trim());
+    }
+    let before = String::from_utf8_lossy(&before_out.stdout)
+        .trim()
+        .to_string();
+
+    // Fetch from the configured remote (no remote arg — let git pick the
+    // upstream's remote based on branch config).
+    let fetch_out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("fetch")
+        .output()
+        .await
+        .context("failed to execute git fetch")?;
+    if !fetch_out.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_out.stderr);
+        bail!("git fetch failed: {}", stderr.trim());
     }
 
-    // Return stdout (e.g. "Already up to date." or merge summary).
-    Ok(stdout.trim().to_string())
+    // Fast-forward only. If the branch has diverged this fails with a clear
+    // git error like "Not possible to fast-forward, aborting." We surface a
+    // friendlier message that tells the user to resolve manually.
+    let merge_out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("merge")
+        .arg("--ff-only")
+        .arg("@{u}")
+        .output()
+        .await
+        .context("failed to execute git merge --ff-only")?;
+
+    if !merge_out.status.success() {
+        let stderr = String::from_utf8_lossy(&merge_out.stderr);
+        bail!(
+            "`{branch}` has diverged from upstream `{upstream}`; refusing to merge or rebase. Resolve manually and re-run. (git: {})",
+            stderr.trim()
+        );
+    }
+
+    // Compare the SHA after the merge to summarize.
+    let after_out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .await
+        .context("failed to execute git rev-parse HEAD")?;
+    if !after_out.status.success() {
+        let stderr = String::from_utf8_lossy(&after_out.stderr);
+        bail!("git rev-parse HEAD failed: {}", stderr.trim());
+    }
+    let after = String::from_utf8_lossy(&after_out.stdout)
+        .trim()
+        .to_string();
+
+    if before == after {
+        Ok("Already up to date.".to_string())
+    } else {
+        let short = |s: &str| s.chars().take(12).collect::<String>();
+        Ok(format!("Updated {}..{}", short(&before), short(&after)))
+    }
 }
 
 /// Check if a path is a git repository (has a .git directory or file).
@@ -75,30 +172,109 @@ pub fn is_git_repo(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
-/// Return the name of the currently checked-out branch in `repo_path`.
+/// The state of `HEAD` in a git repository.
 ///
-/// Shells out to `git -C <path> rev-parse --abbrev-ref HEAD`. If HEAD is
-/// detached this returns the literal string "HEAD" — callers that need to
-/// restore state should treat that as a special case.
-pub async fn current_branch(repo_path: &Path) -> Result<String> {
+/// Either points at a named branch or is detached at a specific commit SHA.
+/// Used by `current_head` / `restore_head` so callers can correctly save and
+/// restore repository state across operations like a temporary `--branch`
+/// override in `kcl ask`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadState {
+    /// `HEAD` points at the named branch.
+    Branch(String),
+    /// `HEAD` is detached at the given commit SHA.
+    Detached(String),
+}
+
+/// Return the current state of `HEAD` in `repo_path`.
+///
+/// First tries `git -C <path> symbolic-ref --short HEAD`, which succeeds with
+/// the branch name when `HEAD` is on a branch and fails when it's detached.
+/// On failure, falls back to `git -C <path> rev-parse HEAD` to get the SHA.
+pub async fn current_head(repo_path: &Path) -> Result<HeadState> {
     check_git()?;
 
-    let output = Command::new("git")
+    let symbolic = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("symbolic-ref")
+        .arg("--short")
+        .arg("HEAD")
+        .output()
+        .await
+        .context("failed to execute git symbolic-ref")?;
+
+    if symbolic.status.success() {
+        let branch = String::from_utf8_lossy(&symbolic.stdout).trim().to_string();
+        return Ok(HeadState::Branch(branch));
+    }
+
+    // Detached HEAD (or other unusual state) — read the raw SHA.
+    let rev = Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .arg("rev-parse")
-        .arg("--abbrev-ref")
         .arg("HEAD")
         .output()
         .await
         .context("failed to execute git rev-parse")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !rev.status.success() {
+        let stderr = String::from_utf8_lossy(&rev.stderr);
         bail!("git rev-parse failed: {}", stderr.trim());
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let sha = String::from_utf8_lossy(&rev.stdout).trim().to_string();
+    Ok(HeadState::Detached(sha))
+}
+
+/// Return the name of the currently checked-out branch in `repo_path`, or
+/// `None` if `HEAD` is detached.
+///
+/// Convenience wrapper around `current_head` for callers that only need a
+/// branch name to record as metadata (e.g. `kcl packages add`).
+pub async fn current_branch(repo_path: &Path) -> Result<Option<String>> {
+    match current_head(repo_path).await? {
+        HeadState::Branch(name) => Ok(Some(name)),
+        HeadState::Detached(_) => Ok(None),
+    }
+}
+
+/// Restore `repo_path` to the given `HeadState`.
+///
+/// For a `Branch` this runs `git checkout <branch>`; for a `Detached` SHA it
+/// runs `git checkout --detach <sha>` so the repository ends up in the same
+/// detached state it was originally in (rather than creating a stray local
+/// branch named after the SHA).
+pub async fn restore_head(repo_path: &Path, head: &HeadState) -> Result<()> {
+    check_git()?;
+
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo_path).arg("checkout");
+    match head {
+        HeadState::Branch(name) => {
+            cmd.arg(name);
+        }
+        HeadState::Detached(sha) => {
+            cmd.arg("--detach").arg(sha);
+        }
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .context("failed to execute git checkout")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let target = match head {
+            HeadState::Branch(name) => name.clone(),
+            HeadState::Detached(sha) => sha.clone(),
+        };
+        bail!("git checkout `{}` failed: {}", target, stderr.trim());
+    }
+
+    Ok(())
 }
 
 /// Check out `branch` in the repository at `repo_path`.
@@ -260,6 +436,105 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
 
+    #[tokio::test]
+    async fn pull_skips_when_branch_has_no_upstream() {
+        let tmp = std::env::temp_dir().join("kcl-test-git-pull-no-upstream");
+        let _ = std::fs::remove_dir_all(&tmp);
+        // init_repo_with_two_commits creates a repo on `main` with no remote.
+        let _ = init_repo_with_two_commits(&tmp).await;
+
+        let result = pull(&tmp).await;
+        assert!(result.is_ok(), "pull failed: {:?}", result.err());
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("has no upstream") && msg.contains("`main`"),
+            "expected no-upstream skip message, got: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn pull_refuses_when_branch_has_diverged() {
+        let tmp = std::env::temp_dir().join("kcl-test-git-pull-diverged");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let remote_dir = tmp.join("remote");
+        let local_dir = tmp.join("local");
+
+        async fn run(dir: &Path, args: &[&str]) -> std::process::Output {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} in {} failed: {}",
+                args,
+                dir.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        }
+
+        // Build a "remote" bare-ish working repo with one commit. We use a
+        // non-bare repo and clone from it via a `file://` URL — simpler than
+        // a bare repo and still exercises the fetch+ff-only path.
+        std::fs::create_dir_all(&remote_dir).unwrap();
+        run(&remote_dir, &["init", "--initial-branch", "main"]).await;
+        run(
+            &remote_dir,
+            &["config", "user.email", "test@example.invalid"],
+        )
+        .await;
+        run(&remote_dir, &["config", "user.name", "Test User"]).await;
+        run(&remote_dir, &["commit", "--allow-empty", "-m", "remote-1"]).await;
+        // Allow pushing into a non-bare repo's checked-out branch.
+        run(
+            &remote_dir,
+            &["config", "receive.denyCurrentBranch", "ignore"],
+        )
+        .await;
+
+        // Clone into `local`. Use file:// so git records a real upstream.
+        let remote_url = format!("file://{}", remote_dir.display());
+        let clone_out = Command::new("git")
+            .args(["clone", &remote_url, local_dir.to_str().unwrap()])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            clone_out.status.success(),
+            "clone failed: {}",
+            String::from_utf8_lossy(&clone_out.stderr)
+        );
+        run(
+            &local_dir,
+            &["config", "user.email", "test@example.invalid"],
+        )
+        .await;
+        run(&local_dir, &["config", "user.name", "Test User"]).await;
+
+        // Add a divergent commit to `remote` (advance its main).
+        run(&remote_dir, &["commit", "--allow-empty", "-m", "remote-2"]).await;
+        // Add a *different* commit to `local` (so its main is divergent, not
+        // just behind).
+        run(&local_dir, &["commit", "--allow-empty", "-m", "local-2"]).await;
+
+        let result = pull(&local_dir).await;
+        assert!(result.is_err(), "expected pull to fail on diverged branch");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("diverged") && err.contains("`main`"),
+            "error should mention divergence and branch: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn is_git_repo_false_for_regular_dir() {
         assert!(!is_git_repo(Path::new("/tmp")));
@@ -304,6 +579,155 @@ mod tests {
             err.contains("prior fetch also failed"),
             "error should mention failed fetch: {err}"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Initialize a fresh repo at `dir` with two commits and return the SHAs
+    /// of the first and second commit (in that order). Configures `user.name`
+    /// and `user.email` locally so the commit calls succeed in CI sandboxes
+    /// that don't have a global git identity set.
+    async fn init_repo_with_two_commits(dir: &Path) -> (String, String) {
+        std::fs::create_dir_all(dir).unwrap();
+
+        async fn run(dir: &Path, args: &[&str]) -> std::process::Output {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        }
+
+        run(dir, &["init", "--initial-branch", "main"]).await;
+        run(dir, &["config", "user.email", "test@example.invalid"]).await;
+        run(dir, &["config", "user.name", "Test User"]).await;
+        run(dir, &["commit", "--allow-empty", "-m", "first"]).await;
+        let first = String::from_utf8(run(dir, &["rev-parse", "HEAD"]).await.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        run(dir, &["commit", "--allow-empty", "-m", "second"]).await;
+        let second = String::from_utf8(run(dir, &["rev-parse", "HEAD"]).await.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        (first, second)
+    }
+
+    #[tokio::test]
+    async fn current_head_reports_branch_when_on_branch() {
+        let tmp = std::env::temp_dir().join("kcl-test-current-head-branch");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (_first, _second) = init_repo_with_two_commits(&tmp).await;
+
+        let head = current_head(&tmp).await.unwrap();
+        assert_eq!(head, HeadState::Branch("main".to_string()));
+
+        // current_branch convenience wrapper agrees.
+        let branch = current_branch(&tmp).await.unwrap();
+        assert_eq!(branch, Some("main".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn current_head_reports_detached_sha() {
+        let tmp = std::env::temp_dir().join("kcl-test-current-head-detached");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (first, _second) = init_repo_with_two_commits(&tmp).await;
+
+        // Detach HEAD at the first commit.
+        let out = Command::new("git")
+            .args(["checkout", "--detach", &first])
+            .current_dir(&tmp)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "detach failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let head = current_head(&tmp).await.unwrap();
+        assert_eq!(head, HeadState::Detached(first.clone()));
+
+        // current_branch returns None for detached HEAD.
+        let branch = current_branch(&tmp).await.unwrap();
+        assert_eq!(branch, None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn restore_head_returns_to_detached_sha() {
+        let tmp = std::env::temp_dir().join("kcl-test-restore-head-detached");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (first, _second) = init_repo_with_two_commits(&tmp).await;
+
+        // Detach at the first commit, capture state, switch to main, then restore.
+        let out = Command::new("git")
+            .args(["checkout", "--detach", &first])
+            .current_dir(&tmp)
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+
+        let saved = current_head(&tmp).await.unwrap();
+        assert_eq!(saved, HeadState::Detached(first.clone()));
+
+        // Move to main (a "different" state) — using `git checkout` directly
+        // rather than `crate::git::checkout` so we don't invoke the fetch
+        // step against the missing `origin` remote.
+        let out = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&tmp)
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+
+        // Now restore the detached state.
+        restore_head(&tmp, &saved).await.unwrap();
+
+        let head_after = current_head(&tmp).await.unwrap();
+        assert_eq!(head_after, HeadState::Detached(first));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn restore_head_returns_to_branch() {
+        let tmp = std::env::temp_dir().join("kcl-test-restore-head-branch");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (first, _second) = init_repo_with_two_commits(&tmp).await;
+
+        // Saved state: on branch main.
+        let saved = current_head(&tmp).await.unwrap();
+        assert_eq!(saved, HeadState::Branch("main".to_string()));
+
+        // Detach to simulate a checkout that moved HEAD.
+        let out = Command::new("git")
+            .args(["checkout", "--detach", &first])
+            .current_dir(&tmp)
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+
+        // Restore.
+        restore_head(&tmp, &saved).await.unwrap();
+        let head_after = current_head(&tmp).await.unwrap();
+        assert_eq!(head_after, HeadState::Branch("main".to_string()));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

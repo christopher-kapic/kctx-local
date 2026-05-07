@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::db;
 use crate::git;
+use crate::git::HeadState;
 use crate::harness;
 use crate::models::conversation::Conversation;
 use crate::models::package::{Package, SourceType};
@@ -104,44 +105,139 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         .map(|s| s.to_string())
         .or_else(|| harness_config.default_model.clone());
 
-    // 3a. If --branch was supplied, check it out (saving the current branch
-    //     so we can restore it after the harness runs). Branch overrides are
-    //     only meaningful for git packages.
-    let repo_path = Path::new(&pkg.path);
-    let original_branch: Option<String> = if let Some(target_branch) = branch_override {
-        if pkg.source_type != SourceType::Git {
-            anyhow::bail!(
-                "--branch is only valid for git packages; `{}` is a local package",
-                pkg.identifier
-            );
-        }
+    // 3a. Resolve the effective branch to check out. CLI `--branch` wins;
+    //     otherwise fall back to the package's pinned `source_branch` (set
+    //     when the package was added with `--branch`). Local packages have
+    //     `source_branch == None`, so this naturally never fires for them.
+    //
+    //     The `--branch is only valid for git packages` error must only be
+    //     raised when the user *explicitly* passed `--branch` for a non-git
+    //     package — not when the branch comes from `pkg.source_branch`.
+    if branch_override.is_some() && pkg.source_type != SourceType::Git {
+        anyhow::bail!(
+            "`--branch` is only valid for git packages; `{}` is a local package",
+            pkg.identifier
+        );
+    }
+    let effective_branch: Option<&str> =
+        resolve_target_branch(branch_override, pkg.source_branch.as_deref());
 
-        let current = git::current_branch(repo_path).await.map_err(|e| {
+    // If an effective branch is resolved AND it differs from the package's
+    // current branch, check it out (saving the current HEAD state so we can
+    // restore it after the harness runs, including the case where the
+    // original HEAD was detached).
+    let repo_path = Path::new(&pkg.path);
+    let original_head: Option<HeadState> = if let Some(target_branch) = effective_branch {
+        let current = git::current_head(repo_path).await.map_err(|e| {
             anyhow::anyhow!(
-                "failed to determine current branch for {}: {}",
+                "failed to determine current HEAD for `{}`: {}",
                 pkg.identifier,
                 e
             )
         })?;
 
-        if current != target_branch {
-            eprintln!("checking out {} (was on {}) ...", target_branch, current);
+        // If we're already on the requested branch there's nothing to do —
+        // and nothing to restore. Detached HEAD always needs a checkout.
+        let already_on_target = matches!(&current, HeadState::Branch(b) if b == target_branch);
+
+        if already_on_target {
+            None
+        } else {
+            let current_desc = match &current {
+                HeadState::Branch(b) => b.clone(),
+                HeadState::Detached(sha) => format!("detached at {}", &sha[..sha.len().min(8)]),
+            };
+            eprintln!(
+                "checking out `{}` (was on `{}`) ...",
+                target_branch, current_desc
+            );
             git::checkout(repo_path, target_branch).await?;
             Some(current)
-        } else {
-            // Already on the requested branch — nothing to restore.
-            None
         }
     } else {
         None
     };
 
-    // 3b. Auto-pull if applicable. --no-pull always wins. When --branch is
-    //     supplied we default to pulling (so the user gets the latest of
-    //     that branch), but --no-pull can suppress it.
+    // Run the post-checkout body inside an inner async block so we can run
+    // `restore_head` on every exit path (including the `?` errors below)
+    // before propagating the result. A Drop guard would not work here
+    // because restoration is async.
+    let result = run_after_checkout(RunAfterCheckout {
+        pkg: &pkg,
+        question,
+        harness_name,
+        harness_config,
+        effective_model,
+        timeout,
+        no_pull,
+        effective_branch_some: effective_branch.is_some(),
+        context,
+        repo_path,
+        db_path: db_path.clone(),
+        conn,
+    })
+    .await;
+
+    // Restore the original HEAD (if we changed it) regardless of how the
+    // post-checkout body finished. Failures are logged but never override
+    // the inner result, since the harness has already produced its answer.
+    if let Some(head) = original_head {
+        restore_head(repo_path, &head).await;
+    }
+
+    result
+}
+
+/// Inputs for the post-checkout phase of `run`.
+///
+/// Bundled into a struct so the helper signature stays readable — `run` itself
+/// uses these to spawn the harness, persist the log, and update the history
+/// index after a successful (or no-op) `--branch` checkout.
+struct RunAfterCheckout<'a> {
+    pkg: &'a Package,
+    question: &'a str,
+    harness_name: String,
+    harness_config: crate::config::HarnessConfig,
+    effective_model: Option<String>,
+    timeout: u64,
+    no_pull: bool,
+    /// True when an effective branch (CLI override or pinned `pkg.source_branch`)
+    /// was resolved for this run. Drives the auto-pull decision so the user
+    /// gets the latest commits on the branch they asked about.
+    effective_branch_some: bool,
+    context: u32,
+    repo_path: &'a Path,
+    db_path: std::path::PathBuf,
+    conn: rusqlite::Connection,
+}
+
+/// The post-checkout body of `kcl ask`: pull, build prompt, run harness, log.
+///
+/// Extracted so `run` can guarantee `restore_head` runs on every exit path
+/// from this function (including any propagated `?` errors).
+async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
+    let RunAfterCheckout {
+        pkg,
+        question,
+        harness_name,
+        harness_config,
+        effective_model,
+        timeout,
+        no_pull,
+        effective_branch_some,
+        context,
+        repo_path,
+        db_path,
+        conn,
+    } = args;
+
+    // 3b. Auto-pull if applicable. --no-pull always wins. When an effective
+    //     branch was resolved (either via `--branch` or via the package's
+    //     pinned `source_branch`) we default to pulling so the user gets
+    //     the latest commits on that branch; `--no-pull` still suppresses it.
     let should_pull = if no_pull {
         false
-    } else if branch_override.is_some() {
+    } else if effective_branch_some {
         true
     } else {
         pkg.auto_pull && pkg.source_type == SourceType::Git
@@ -276,10 +372,6 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
         }
     }
 
-    // 8. Restore the original branch (if we changed it) and exit with the
-    //    harness exit code.
-    restore_branch(repo_path, original_branch.as_deref()).await;
-
     // Exit code semantics:
     //   0 → harness succeeded
     //   2 → harness terminated without a normal exit status (signal-killed,
@@ -303,18 +395,31 @@ fn write_log_file(pkg_log_dir: &Path, log_path: &Path, log: &ConversationLog) ->
     Ok(())
 }
 
-/// Try to restore `repo_path` to the previously checked-out branch.
+/// Resolve the branch `kcl ask` should check out for this run.
+///
+/// CLI `--branch` always wins over the package's pinned `source_branch`. If
+/// neither is set, returns `None` and the package's current HEAD is left
+/// untouched.
+fn resolve_target_branch<'a>(
+    branch_override: Option<&'a str>,
+    pkg_source_branch: Option<&'a str>,
+) -> Option<&'a str> {
+    branch_override.or(pkg_source_branch)
+}
+
+/// Try to restore `repo_path` to its original `HeadState`.
 ///
 /// Failures are logged to stderr but never propagated — the harness has
 /// already produced its result and the user shouldn't see a successful
 /// answer turn into a failed exit code just because git was unhappy.
-async fn restore_branch(repo_path: &Path, original_branch: Option<&str>) {
-    let Some(branch) = original_branch else {
-        return;
+async fn restore_head(repo_path: &Path, head: &HeadState) {
+    let target_desc = match head {
+        HeadState::Branch(name) => format!("branch `{}`", name),
+        HeadState::Detached(sha) => format!("detached at `{}`", &sha[..sha.len().min(8)]),
     };
-    eprintln!("restoring branch {} ...", branch);
-    if let Err(e) = git::checkout(repo_path, branch).await {
-        eprintln!("warning: failed to restore branch {}: {}", branch, e);
+    eprintln!("restoring {} ...", target_desc);
+    if let Err(e) = git::restore_head(repo_path, head).await {
+        eprintln!("warning: failed to restore {}: {}", target_desc, e);
     }
 }
 
@@ -525,6 +630,39 @@ mod tests {
         let json = serde_json::to_string_pretty(&log).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.get("pull_error").is_none());
+    }
+
+    #[test]
+    fn resolve_target_branch_prefers_override() {
+        // Construct a Package with a pinned source_branch to mirror real usage.
+        let pkg = Package::new(
+            "hono".to_string(),
+            "Hono".to_string(),
+            SourceType::Git,
+            Some("https://github.com/honojs/hono.git".to_string()),
+            Some("next".to_string()),
+            "/tmp/hono".to_string(),
+            true,
+            None,
+        );
+
+        // No CLI override: fall back to the package's pinned branch.
+        assert_eq!(
+            resolve_target_branch(None, pkg.source_branch.as_deref()),
+            Some("next")
+        );
+
+        // CLI override wins over the pinned branch.
+        assert_eq!(
+            resolve_target_branch(Some("main"), pkg.source_branch.as_deref()),
+            Some("main")
+        );
+
+        // Neither set: returns None (current HEAD left untouched).
+        assert_eq!(resolve_target_branch(None, None), None);
+
+        // Override set, no pinned branch.
+        assert_eq!(resolve_target_branch(Some("dev"), None), Some("dev"));
     }
 
     #[test]

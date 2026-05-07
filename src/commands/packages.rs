@@ -1,13 +1,37 @@
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 
 use crate::cli::PackagesCommand;
-use crate::config::Config;
+use crate::config::{Config, validate_harness_configured};
 use crate::db;
 use crate::git;
 use crate::models::package::{Package, SourceType};
 use crate::paths;
+
+/// Current version of the export manifest format. Bump on incompatible changes.
+const MANIFEST_VERSION: u32 = 1;
+
+/// On-disk manifest format for `kcl packages export` / `import`.
+#[derive(Debug, Serialize, Deserialize)]
+struct ExportManifest {
+    version: u32,
+    packages: Vec<ExportEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ExportEntry {
+    identifier: String,
+    git: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
+    auto_pull: bool,
+}
 
 /// Helper to open the database from the default location.
 fn open_db() -> Result<rusqlite::Connection> {
@@ -41,6 +65,8 @@ pub async fn run(command: &PackagesCommand) -> Result<()> {
             value,
             unset,
         } => cmd_set(identifier, key, value.as_deref(), *unset),
+        PackagesCommand::Export => cmd_export(),
+        PackagesCommand::Import { file } => cmd_import(file.as_deref()).await,
     }
 }
 
@@ -118,9 +144,33 @@ async fn cmd_add(
         // Git package — may or may not have an explicit --path.
         if let Some(p) = path {
             let abs = resolve_and_validate_path(p)?;
+            let abs_path = Path::new(&abs);
+            // The user is registering an existing on-disk repo against a URL.
+            // Verify it actually is a git repo, and that its origin remote
+            // matches what they passed — otherwise `kcl pull` / branch
+            // operations will fail confusingly later.
+            ensure_path_is_git_repo(abs_path)?;
+            match check_origin_url(abs_path, git_url).await {
+                OriginCheck::Match => {}
+                OriginCheck::Mismatch(actual) => {
+                    eprintln!(
+                        "warning: path `{abs}` has origin `{actual}`, but you supplied `{git_url}`. Recording the package anyway — this may indicate a fork or mirror."
+                    );
+                }
+                OriginCheck::NoRemote => {
+                    eprintln!(
+                        "warning: path `{abs}` has no `origin` remote — cannot verify it matches `{git_url}`."
+                    );
+                }
+                OriginCheck::Error(e) => {
+                    eprintln!(
+                        "warning: failed to check origin URL of `{abs}`: {e}. Recording the package anyway."
+                    );
+                }
+            }
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
-                None => git::current_branch(Path::new(&abs)).await.ok(),
+                None => git::current_branch(abs_path).await.ok().flatten(),
             };
             (
                 SourceType::Git,
@@ -162,7 +212,7 @@ async fn cmd_add(
             }
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
-                None => git::current_branch(&pkg_dir).await.ok(),
+                None => git::current_branch(&pkg_dir).await.ok().flatten(),
             };
             (
                 SourceType::Git,
@@ -207,7 +257,7 @@ async fn cmd_add(
             // --branch value or the remote's default).
             let recorded_branch = match branch {
                 Some(b) => Some(b.to_string()),
-                None => git::current_branch(&pkg_dir).await.ok(),
+                None => git::current_branch(&pkg_dir).await.ok().flatten(),
             };
 
             (
@@ -276,6 +326,63 @@ fn resolve_and_validate_path(p: &str) -> Result<String> {
     }
 
     Ok(abs.to_string_lossy().to_string())
+}
+
+/// Verify that `abs` contains a `.git` entry. Uses `.exists()` rather than
+/// `.is_dir()` because in git worktrees and submodules `.git` is a regular
+/// file pointing at the real gitdir.
+fn ensure_path_is_git_repo(abs: &Path) -> Result<()> {
+    if !abs.join(".git").exists() {
+        bail!(
+            "path `{}` is not a git repository (no `.git` found)",
+            abs.display()
+        );
+    }
+    Ok(())
+}
+
+/// Result of comparing a repo's `origin` remote URL against an expected URL.
+#[derive(Debug, PartialEq, Eq)]
+enum OriginCheck {
+    /// `origin` remote URL exactly matches the expected URL.
+    Match,
+    /// `origin` is configured but points at a different URL (carries the actual URL).
+    Mismatch(String),
+    /// No `origin` remote is configured.
+    NoRemote,
+    /// `git remote get-url` could not be invoked (e.g. spawn failure).
+    Error(String),
+}
+
+/// Run `git -C <repo_path> remote get-url origin` and compare its output
+/// against `expected_url`. Used to warn when `--git` and `--path` disagree.
+async fn check_origin_url(repo_path: &Path, expected_url: &str) -> OriginCheck {
+    let output = match Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("remote")
+        .arg("get-url")
+        .arg("origin")
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => return OriginCheck::Error(e.to_string()),
+    };
+
+    if !output.status.success() {
+        // `git remote get-url origin` exits non-zero when origin doesn't
+        // exist (and in any other failure mode). Treat all of these as
+        // "no remote we can check against" rather than a hard error.
+        return OriginCheck::NoRemote;
+    }
+
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if actual == expected_url {
+        OriginCheck::Match
+    } else {
+        OriginCheck::Mismatch(actual)
+    }
 }
 
 fn cmd_remove(identifier: &str) -> Result<()> {
@@ -414,20 +521,6 @@ async fn cmd_pull(identifier: Option<&str>, all: bool) -> Result<()> {
     Ok(())
 }
 
-fn validate_harness_configured(config: &Config, name: &str) -> Result<()> {
-    if config.harnesses.contains_key(name) {
-        return Ok(());
-    }
-    let mut configured: Vec<&str> = config.harnesses.keys().map(String::as_str).collect();
-    configured.sort();
-    let valid = if configured.is_empty() {
-        "(none configured; run `kcl init` to add harnesses)".to_string()
-    } else {
-        configured.join(", ")
-    };
-    bail!("Unknown harness `{name}`. Configured harnesses: {valid}");
-}
-
 fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Result<()> {
     let conn = open_db()?;
 
@@ -469,6 +562,150 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
 
     pkg.update(&conn)?;
     eprintln!("updated `{identifier}`");
+    Ok(())
+}
+
+fn build_manifest(packages: &[Package]) -> (ExportManifest, Vec<String>) {
+    let mut entries = Vec::new();
+    let mut skipped_local = Vec::new();
+    for pkg in packages {
+        match (&pkg.source_type, pkg.source_url.as_deref()) {
+            (SourceType::Git, Some(url)) => {
+                entries.push(ExportEntry {
+                    identifier: pkg.identifier.clone(),
+                    git: url.to_string(),
+                    branch: pkg.source_branch.clone(),
+                    harness: pkg.harness.clone(),
+                    auto_pull: pkg.auto_pull,
+                });
+            }
+            _ => skipped_local.push(pkg.identifier.clone()),
+        }
+    }
+    (
+        ExportManifest {
+            version: MANIFEST_VERSION,
+            packages: entries,
+        },
+        skipped_local,
+    )
+}
+
+fn cmd_export() -> Result<()> {
+    let conn = open_db()?;
+    let packages = Package::list_all(&conn)?;
+    let (manifest, skipped) = build_manifest(&packages);
+
+    for id in &skipped {
+        eprintln!("skipping `{id}`: local package has no reproducible source URL");
+    }
+
+    let out = serde_json::to_string_pretty(&manifest)?;
+    println!("{out}");
+    Ok(())
+}
+
+fn read_manifest_input(file: Option<&str>) -> Result<String> {
+    match file {
+        None | Some("-") => {
+            let mut s = String::new();
+            std::io::stdin()
+                .read_to_string(&mut s)
+                .context("failed to read manifest from stdin")?;
+            Ok(s)
+        }
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read manifest from {path}")),
+    }
+}
+
+fn parse_manifest(input: &str) -> Result<ExportManifest> {
+    let manifest: ExportManifest =
+        serde_json::from_str(input).context("failed to parse manifest as JSON")?;
+    if manifest.version != MANIFEST_VERSION {
+        bail!(
+            "unsupported manifest version `{}` (this kcl understands version `{}`)",
+            manifest.version,
+            MANIFEST_VERSION
+        );
+    }
+    Ok(manifest)
+}
+
+/// If the manifest entry pins a harness, verify it exists in `config` before
+/// we attempt to clone the repo. Doing this up-front avoids the wasted I/O of
+/// cloning a multi-gigabyte monorepo only to fail at the harness-write step.
+fn validate_import_entry_harness(config: &Config, entry: &ExportEntry) -> Result<()> {
+    if let Some(name) = entry.harness.as_deref() {
+        validate_harness_configured(config, name)?;
+    }
+    Ok(())
+}
+
+async fn cmd_import(file: Option<&str>) -> Result<()> {
+    let input = read_manifest_input(file)?;
+    let manifest = parse_manifest(&input)?;
+
+    let config = Config::load_or_default()?;
+    let mut added = 0u32;
+    let mut skipped = 0u32;
+    let mut failed = 0u32;
+
+    for entry in &manifest.packages {
+        // Pre-check: skip identifiers already registered. This keeps import
+        // idempotent so users can re-run it after partial failures.
+        let already_exists = {
+            let conn = open_db()?;
+            Package::get_by_identifier(&conn, &entry.identifier)?.is_some()
+        };
+        if already_exists {
+            eprintln!("skipping `{}`: already registered", entry.identifier);
+            skipped += 1;
+            continue;
+        }
+
+        // Validate the manifest's pinned harness against local config before
+        // cloning. Otherwise we'd clone the repo, then fail to record the
+        // harness, leaving an orphan on disk.
+        if let Err(e) = validate_import_entry_harness(&config, entry) {
+            eprintln!("error importing `{}`: {:#}", entry.identifier, e);
+            failed += 1;
+            continue;
+        }
+
+        match cmd_add(
+            &entry.identifier,
+            None,
+            Some(&entry.git),
+            entry.branch.as_deref(),
+        )
+        .await
+        {
+            Ok(()) => {
+                // cmd_add hardcodes auto_pull = true and harness = None for
+                // git packages. Apply the manifest's overrides only when they
+                // diverge from those defaults.
+                if !entry.auto_pull || entry.harness.is_some() {
+                    let conn = open_db()?;
+                    if let Some(mut pkg) = Package::get_by_identifier(&conn, &entry.identifier)? {
+                        pkg.auto_pull = entry.auto_pull;
+                        pkg.harness = entry.harness.clone();
+                        pkg.update(&conn)?;
+                    }
+                }
+                added += 1;
+            }
+            Err(e) => {
+                eprintln!("error importing `{}`: {:#}", entry.identifier, e);
+                failed += 1;
+            }
+        }
+    }
+
+    eprintln!("imported {added} package(s), skipped {skipped}, {failed} error(s)");
+    if failed > 0 {
+        bail!("{failed} package(s) failed to import");
+    }
     Ok(())
 }
 
@@ -820,50 +1057,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_harness_accepts_configured_name() {
-        use crate::config::{HarnessConfig, PromptMode};
-        let mut config = Config::default();
-        config.harnesses.insert(
-            "my-custom".to_string(),
-            HarnessConfig {
-                command: "my-agent".to_string(),
-                args: vec![],
-                prompt_mode: PromptMode::Arg,
-                model_args: vec![],
-                default_model: None,
-            },
-        );
-        validate_harness_configured(&config, "my-custom").unwrap();
-    }
-
-    #[test]
-    fn validate_harness_rejects_unconfigured_name() {
-        use crate::config::{HarnessConfig, PromptMode};
-        let mut config = Config::default();
-        config.harnesses.insert(
-            "claude".to_string(),
-            HarnessConfig {
-                command: "claude".to_string(),
-                args: vec![],
-                prompt_mode: PromptMode::Arg,
-                model_args: vec![],
-                default_model: None,
-            },
-        );
-        let err = validate_harness_configured(&config, "nonexistent").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Unknown harness `nonexistent`"));
-        assert!(msg.contains("claude"));
-    }
-
-    #[test]
-    fn validate_harness_reports_when_none_configured() {
-        let config = Config::default();
-        let err = validate_harness_configured(&config, "anything").unwrap_err();
-        assert!(err.to_string().contains("none configured"));
-    }
-
-    #[test]
     fn show_json_serialization() {
         let (conn, _pkg) = setup();
         let pkg = Package::get_by_identifier(&conn, "testpkg")
@@ -876,5 +1069,312 @@ mod tests {
         assert_eq!(parsed["source_type"], "local");
         assert_eq!(parsed["auto_pull"], false);
         assert_eq!(parsed["path"], "/tmp/testpkg");
+    }
+
+    fn git_package(identifier: &str, url: &str, branch: Option<&str>) -> Package {
+        Package::new(
+            identifier.to_string(),
+            identifier.to_string(),
+            SourceType::Git,
+            Some(url.to_string()),
+            branch.map(String::from),
+            format!("/clones/{identifier}"),
+            true,
+            None,
+        )
+    }
+
+    #[test]
+    fn build_manifest_skips_local_packages() {
+        let local = Package::new(
+            "local-pkg".to_string(),
+            "local-pkg".to_string(),
+            SourceType::Local,
+            None,
+            None,
+            "/some/path".to_string(),
+            false,
+            None,
+        );
+        let git = git_package("axum", "https://github.com/tokio-rs/axum.git", Some("main"));
+
+        let (manifest, skipped) = build_manifest(&[local, git]);
+
+        assert_eq!(manifest.version, MANIFEST_VERSION);
+        assert_eq!(manifest.packages.len(), 1);
+        assert_eq!(manifest.packages[0].identifier, "axum");
+        assert_eq!(
+            manifest.packages[0].git,
+            "https://github.com/tokio-rs/axum.git"
+        );
+        assert_eq!(manifest.packages[0].branch.as_deref(), Some("main"));
+        assert!(manifest.packages[0].auto_pull);
+        assert_eq!(skipped, vec!["local-pkg"]);
+    }
+
+    #[test]
+    fn build_manifest_preserves_harness_and_auto_pull() {
+        let mut git = git_package("axum", "https://github.com/tokio-rs/axum.git", None);
+        git.harness = Some("claude".to_string());
+        git.auto_pull = false;
+
+        let (manifest, _) = build_manifest(&[git]);
+        assert_eq!(manifest.packages[0].harness.as_deref(), Some("claude"));
+        assert!(!manifest.packages[0].auto_pull);
+        assert!(manifest.packages[0].branch.is_none());
+    }
+
+    #[test]
+    fn manifest_round_trip_via_json() {
+        let git = git_package(
+            "kctx",
+            "git@github.com:christopher-kapic/kctx.git",
+            Some("master"),
+        );
+        let (manifest, _) = build_manifest(&[git]);
+
+        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let parsed = parse_manifest(&json).unwrap();
+        assert_eq!(parsed.version, MANIFEST_VERSION);
+        assert_eq!(parsed.packages.len(), 1);
+        assert_eq!(parsed.packages[0].identifier, "kctx");
+        assert_eq!(
+            parsed.packages[0].git,
+            "git@github.com:christopher-kapic/kctx.git"
+        );
+        assert_eq!(parsed.packages[0].branch.as_deref(), Some("master"));
+    }
+
+    #[test]
+    fn manifest_omits_none_fields_in_json() {
+        let git = git_package("axum", "https://github.com/tokio-rs/axum.git", None);
+        let (manifest, _) = build_manifest(&[git]);
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        // branch and harness are None — should not appear in serialized JSON.
+        assert!(!json.contains("\"branch\""));
+        assert!(!json.contains("\"harness\""));
+        assert!(json.contains("\"auto_pull\""));
+    }
+
+    #[test]
+    fn parse_manifest_rejects_wrong_version() {
+        let bad = r#"{"version": 999, "packages": []}"#;
+        let err = parse_manifest(bad).unwrap_err();
+        assert!(err.to_string().contains("unsupported manifest version"));
+    }
+
+    #[test]
+    fn parse_manifest_rejects_invalid_json() {
+        let err = parse_manifest("{not valid json").unwrap_err();
+        assert!(err.to_string().contains("failed to parse manifest"));
+    }
+
+    #[test]
+    fn parse_manifest_accepts_minimal_entry() {
+        // Only identifier, git, and auto_pull are required; branch and
+        // harness are optional and may be omitted entirely.
+        let minimal = r#"{
+            "version": 1,
+            "packages": [
+                {"identifier": "axum", "git": "https://github.com/tokio-rs/axum.git", "auto_pull": true}
+            ]
+        }"#;
+        let manifest = parse_manifest(minimal).unwrap();
+        assert_eq!(manifest.packages.len(), 1);
+        assert_eq!(manifest.packages[0].identifier, "axum");
+        assert!(manifest.packages[0].branch.is_none());
+        assert!(manifest.packages[0].harness.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_accepts_empty_packages_list() {
+        let empty = r#"{"version": 1, "packages": []}"#;
+        let manifest = parse_manifest(empty).unwrap();
+        assert!(manifest.packages.is_empty());
+    }
+
+    #[test]
+    fn validate_import_entry_harness_rejects_unknown_name() {
+        use crate::config::{HarnessConfig, PromptMode};
+
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+
+        let entry = ExportEntry {
+            identifier: "axum".to_string(),
+            git: "https://github.com/tokio-rs/axum.git".to_string(),
+            branch: None,
+            harness: Some("nonexistent".to_string()),
+            auto_pull: true,
+        };
+
+        let err = validate_import_entry_harness(&config, &entry).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unknown harness `nonexistent`"),
+            "expected `Unknown harness` in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_import_entry_harness_accepts_known_name() {
+        use crate::config::{HarnessConfig, PromptMode};
+
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+
+        let entry = ExportEntry {
+            identifier: "axum".to_string(),
+            git: "https://github.com/tokio-rs/axum.git".to_string(),
+            branch: None,
+            harness: Some("claude".to_string()),
+            auto_pull: true,
+        };
+
+        validate_import_entry_harness(&config, &entry).unwrap();
+    }
+
+    #[test]
+    fn validate_import_entry_harness_skips_when_no_harness() {
+        // Entries that don't pin a harness must pass validation regardless of
+        // what's configured locally — the manifest format makes harness
+        // optional, and a None entry inherits whatever default the importer
+        // already has.
+        let config = Config::default();
+        let entry = ExportEntry {
+            identifier: "axum".to_string(),
+            git: "https://github.com/tokio-rs/axum.git".to_string(),
+            branch: None,
+            harness: None,
+            auto_pull: true,
+        };
+        validate_import_entry_harness(&config, &entry).unwrap();
+    }
+
+    /// Initialize a fresh repo at `dir` with one commit. Configures local
+    /// `user.name` and `user.email` so the commit succeeds in CI sandboxes
+    /// without a global git identity.
+    async fn init_test_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        async fn run(dir: &Path, args: &[&str]) {
+            let out = tokio::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        run(dir, &["init", "--initial-branch", "main"]).await;
+        run(dir, &["config", "user.email", "test@example.invalid"]).await;
+        run(dir, &["config", "user.name", "Test User"]).await;
+        run(dir, &["commit", "--allow-empty", "-m", "init"]).await;
+    }
+
+    #[test]
+    fn ensure_path_is_git_repo_rejects_non_repo() {
+        let tmp = std::env::temp_dir().join("kcl-test-ensure-non-repo");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let err = ensure_path_is_git_repo(&tmp).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not a git repository"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("`.git`"), "should mention `.git`: {msg}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn ensure_path_is_git_repo_accepts_real_repo() {
+        let tmp = std::env::temp_dir().join("kcl-test-ensure-real-repo");
+        let _ = std::fs::remove_dir_all(&tmp);
+        init_test_repo(&tmp).await;
+
+        assert!(ensure_path_is_git_repo(&tmp).is_ok());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn check_origin_url_matches_when_remotes_agree() {
+        let tmp = std::env::temp_dir().join("kcl-test-origin-match");
+        let _ = std::fs::remove_dir_all(&tmp);
+        init_test_repo(&tmp).await;
+
+        let url = "https://example.com/repo.git";
+        let out = tokio::process::Command::new("git")
+            .args(["remote", "add", "origin", url])
+            .current_dir(&tmp)
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+
+        let result = check_origin_url(&tmp, url).await;
+        assert_eq!(result, OriginCheck::Match);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn check_origin_url_returns_mismatch_with_actual_url() {
+        let tmp = std::env::temp_dir().join("kcl-test-origin-mismatch");
+        let _ = std::fs::remove_dir_all(&tmp);
+        init_test_repo(&tmp).await;
+
+        let actual = "https://example.com/repo-a.git";
+        let supplied = "https://example.com/repo-b.git";
+        let out = tokio::process::Command::new("git")
+            .args(["remote", "add", "origin", actual])
+            .current_dir(&tmp)
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+
+        let result = check_origin_url(&tmp, supplied).await;
+        assert_eq!(result, OriginCheck::Mismatch(actual.to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn check_origin_url_returns_no_remote_when_origin_missing() {
+        let tmp = std::env::temp_dir().join("kcl-test-origin-missing");
+        let _ = std::fs::remove_dir_all(&tmp);
+        init_test_repo(&tmp).await;
+
+        let result = check_origin_url(&tmp, "https://example.com/repo.git").await;
+        assert_eq!(result, OriginCheck::NoRemote);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

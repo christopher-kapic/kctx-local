@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::cli::ConfigCommand;
-use crate::config::{Config, HarnessConfig, PromptMode};
+use crate::config::{Config, HarnessConfig, PromptMode, validate_harness_configured};
 use crate::paths;
 
 pub fn run(command: &ConfigCommand) -> Result<()> {
@@ -148,6 +148,10 @@ fn apply_set(path: &Path, key: &str, value: &str) -> Result<()> {
             config.clone_dir = value.to_string();
         }
         "default_harness" => {
+            // Validate before assignment so users can't set a default that
+            // doesn't exist — otherwise the failure surfaces only later when
+            // `kcl ask` tries to invoke it.
+            validate_harness_configured(&config, value)?;
             config.default_harness = value.to_string();
         }
         "default_timeout" => {
@@ -445,6 +449,73 @@ mod tests {
         assert!(out.contains("args:          -"));
         assert!(out.contains("model_args:    --model {model}"));
         assert!(out.contains("default_model: claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn apply_set_default_harness_rejects_unconfigured_name() {
+        use crate::config::{HarnessConfig, PromptMode};
+
+        let (path, _cleanup) = setup_test_config();
+        // Seed the config with one configured harness so the error message
+        // exercises the "configured: claude" branch (not the "none configured"
+        // fallback).
+        let mut config = Config::load(&path).unwrap();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+        config.save(&path).unwrap();
+
+        let err = super::apply_set(&path, "default_harness", "nonexistent").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unknown harness `nonexistent`"),
+            "expected `Unknown harness` in error, got: {msg}"
+        );
+
+        // The config on disk must be unchanged after a rejected set.
+        let after = Config::load(&path).unwrap();
+        assert_eq!(after.default_harness, "claude");
+    }
+
+    #[test]
+    fn apply_set_default_harness_accepts_configured_name() {
+        use crate::config::{HarnessConfig, PromptMode};
+
+        let (path, _cleanup) = setup_test_config();
+        let mut config = Config::load(&path).unwrap();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+        config.harnesses.insert(
+            "opencode".to_string(),
+            HarnessConfig {
+                command: "opencode".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+        config.save(&path).unwrap();
+
+        super::apply_set(&path, "default_harness", "opencode").unwrap();
+
+        let after = Config::load(&path).unwrap();
+        assert_eq!(after.default_harness, "opencode");
     }
 
     #[test]

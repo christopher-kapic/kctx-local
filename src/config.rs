@@ -83,6 +83,26 @@ pub fn validate_timeout(seconds: u64) -> Result<()> {
     Ok(())
 }
 
+/// Verify that `name` matches a harness defined in `config.harnesses`.
+///
+/// Used by every code path that records a harness name (package overrides,
+/// the default_harness top-level key, manifest imports) so that an invalid
+/// name fails fast at write time with a helpful list of configured options,
+/// rather than blowing up later when `kcl ask` tries to invoke it.
+pub fn validate_harness_configured(config: &Config, name: &str) -> Result<()> {
+    if config.harnesses.contains_key(name) {
+        return Ok(());
+    }
+    let mut configured: Vec<&str> = config.harnesses.keys().map(String::as_str).collect();
+    configured.sort();
+    let valid = if configured.is_empty() {
+        "(none configured; run `kcl init` to add harnesses)".to_string()
+    } else {
+        configured.join(", ")
+    };
+    anyhow::bail!("Unknown harness `{name}`. Configured harnesses: {valid}");
+}
+
 impl FromStr for PromptMode {
     type Err = anyhow::Error;
 
@@ -327,6 +347,48 @@ mod tests {
         assert_eq!(config, loaded);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_harness_accepts_configured_name() {
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "my-custom".to_string(),
+            HarnessConfig {
+                command: "my-agent".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+        validate_harness_configured(&config, "my-custom").unwrap();
+    }
+
+    #[test]
+    fn validate_harness_rejects_unconfigured_name() {
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec![],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+            },
+        );
+        let err = validate_harness_configured(&config, "nonexistent").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown harness `nonexistent`"));
+        assert!(msg.contains("claude"));
+    }
+
+    #[test]
+    fn validate_harness_reports_when_none_configured() {
+        let config = Config::default();
+        let err = validate_harness_configured(&config, "anything").unwrap_err();
+        assert!(err.to_string().contains("none configured"));
     }
 
     #[test]

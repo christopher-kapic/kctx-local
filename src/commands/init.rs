@@ -144,8 +144,7 @@ fn select_default_harness(
     non_interactive: bool,
     existing_default: Option<&str>,
 ) -> Result<String> {
-    let existing_idx =
-        existing_default.and_then(|d| detected.iter().position(|n| n == d));
+    let existing_idx = existing_default.and_then(|d| detected.iter().position(|n| n == d));
 
     match detected.len() {
         0 => {
@@ -486,16 +485,14 @@ mod tests {
     #[test]
     fn select_default_multiple_prefers_existing_when_detected() {
         let detected = vec!["claude".to_string(), "copilot".to_string()];
-        let result =
-            select_default_harness(&detected, true, Some("copilot")).unwrap();
+        let result = select_default_harness(&detected, true, Some("copilot")).unwrap();
         assert_eq!(result, "copilot");
     }
 
     #[test]
     fn select_default_multiple_falls_back_when_existing_not_detected() {
         let detected = vec!["claude".to_string(), "copilot".to_string()];
-        let result =
-            select_default_harness(&detected, true, Some("nonexistent")).unwrap();
+        let result = select_default_harness(&detected, true, Some("nonexistent")).unwrap();
         assert_eq!(result, "claude");
     }
 
