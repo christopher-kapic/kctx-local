@@ -166,6 +166,20 @@ pub enum PackagesCommand {
         #[arg(long)]
         unset: bool,
     },
+
+    /// Export registered git packages as a JSON manifest (writes to stdout).
+    /// Local packages are skipped because their absolute paths are not
+    /// reproducible on another machine.
+    Export,
+
+    /// Import packages from a JSON manifest produced by `kcl packages export`.
+    /// Reads from the given file, or from stdin if no file is given (or `-`).
+    /// Existing identifiers are skipped; failures on individual entries do
+    /// not abort the batch.
+    Import {
+        /// Manifest file (omit or pass `-` to read stdin)
+        file: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

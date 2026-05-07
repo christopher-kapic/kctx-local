@@ -50,15 +50,17 @@ kcl packages add my-project --path /path/to/project
 # Register a git repo (kcl clones it for you, using the remote's default branch)
 kcl packages add hono --git https://github.com/honojs/hono.git
 
-# Or pin to a specific branch
+# Or pin the package to a specific branch — subsequent `kcl ask hono ...`
+# invocations check out `next` (and pull) before answering, then restore the
+# original branch when they're done
 kcl packages add hono --git https://github.com/honojs/hono.git --branch next
 
-# Ask a question
+# Ask a question (uses the pinned branch `next` if one was set above)
 kcl ask hono "How does the router middleware work?"
 
-# Ask against a different branch — kcl checks it out, pulls, answers, then
-# restores the original branch
-kcl ask hono "What changed in the router on the next branch?" --branch next
+# Override the pinned branch for a single question — kcl checks the override
+# out, pulls, answers, then restores the original branch
+kcl ask hono "What changed in the router on main?" --branch main
 
 # List registered packages
 kcl packages list
@@ -72,7 +74,7 @@ kcl history list
 kcl stores its config at `~/.config/kcl/config.json`. Configure your preferred harness and defaults:
 
 ```bash
-kcl config set default_harness claude-code
+kcl config set default_harness claude
 kcl config show
 ```
 
