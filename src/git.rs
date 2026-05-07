@@ -102,7 +102,9 @@ pub async fn pull(repo_path: &Path) -> Result<String> {
         let stderr = String::from_utf8_lossy(&before_out.stderr);
         bail!("git rev-parse HEAD failed: {}", stderr.trim());
     }
-    let before = String::from_utf8_lossy(&before_out.stdout).trim().to_string();
+    let before = String::from_utf8_lossy(&before_out.stdout)
+        .trim()
+        .to_string();
 
     // Fetch from the configured remote (no remote arg — let git pick the
     // upstream's remote based on branch config).
@@ -152,7 +154,9 @@ pub async fn pull(repo_path: &Path) -> Result<String> {
         let stderr = String::from_utf8_lossy(&after_out.stderr);
         bail!("git rev-parse HEAD failed: {}", stderr.trim());
     }
-    let after = String::from_utf8_lossy(&after_out.stdout).trim().to_string();
+    let after = String::from_utf8_lossy(&after_out.stdout)
+        .trim()
+        .to_string();
 
     if before == after {
         Ok("Already up to date.".to_string())
@@ -507,7 +511,11 @@ mod tests {
             "clone failed: {}",
             String::from_utf8_lossy(&clone_out.stderr)
         );
-        run(&local_dir, &["config", "user.email", "test@example.invalid"]).await;
+        run(
+            &local_dir,
+            &["config", "user.email", "test@example.invalid"],
+        )
+        .await;
         run(&local_dir, &["config", "user.name", "Test User"]).await;
 
         // Add a divergent commit to `remote` (advance its main).

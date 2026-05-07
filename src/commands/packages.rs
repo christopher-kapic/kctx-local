@@ -687,9 +687,7 @@ async fn cmd_import(file: Option<&str>) -> Result<()> {
                 // diverge from those defaults.
                 if !entry.auto_pull || entry.harness.is_some() {
                     let conn = open_db()?;
-                    if let Some(mut pkg) =
-                        Package::get_by_identifier(&conn, &entry.identifier)?
-                    {
+                    if let Some(mut pkg) = Package::get_by_identifier(&conn, &entry.identifier)? {
                         pkg.auto_pull = entry.auto_pull;
                         pkg.harness = entry.harness.clone();
                         pkg.update(&conn)?;
@@ -1105,7 +1103,10 @@ mod tests {
         assert_eq!(manifest.version, MANIFEST_VERSION);
         assert_eq!(manifest.packages.len(), 1);
         assert_eq!(manifest.packages[0].identifier, "axum");
-        assert_eq!(manifest.packages[0].git, "https://github.com/tokio-rs/axum.git");
+        assert_eq!(
+            manifest.packages[0].git,
+            "https://github.com/tokio-rs/axum.git"
+        );
         assert_eq!(manifest.packages[0].branch.as_deref(), Some("main"));
         assert!(manifest.packages[0].auto_pull);
         assert_eq!(skipped, vec!["local-pkg"]);
