@@ -435,16 +435,11 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         );
     }
 
-    // 7. Insert conversation index row into SQLite (must come *before* the
-    //    embedding row because of the FK on conversation_embeddings).
-    //    Persistence is best-effort only; we never fail the user's `kcl ask`
-    //    because recording failed.
-    //
-    //    The optional embedding is computed *before* we touch the database at
-    //    all. This keeps the (short) write transaction free of network I/O so
-    //    concurrent `kcl` processes are never blocked on an embedding provider
-    //    call. We then use rusqlite's `transaction()` helper so that any
-    //    failure path or panic automatically rolls back.
+    // 7. Build the conversation row we will (best-effort) persist, plus the
+    //    optional embedding for successful runs. The actual write is delegated
+    //    to `record_conversation_and_embedding` below so the main flow stays
+    //    readable. The embedding must be computed before we open any DB write
+    //    transaction (see the helper for rationale).
     let conversation = Conversation {
         id: conv_id.clone(),
         package_id: pkg.id.clone(),
@@ -483,17 +478,58 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         None
     };
 
-    match db::open(&db_path) {
+    // 7. Best-effort persistence of the conversation (and embedding for
+    //    successful runs) into the SQLite index. Extracted so the main flow
+    //    stays linear; all errors are warnings only.
+    record_conversation_and_embedding(&db_path, conversation, &conv_id, embedding_row);
+
+    // Exit code semantics:
+    //   0 → harness succeeded
+    //   2 → harness terminated without a normal exit status (signal-killed,
+    //       spawn failure, timeout). Distinguished from harness errors because
+    //       the child did not get to report its own result.
+    //   3 → harness ran to completion but exited non-zero.
+    match exit_code {
+        Some(0) => Ok(0),
+        Some(_) => Ok(3),
+        None => Ok(2),
+    }
+}
+
+/// Serialize `log` and write it to `log_path`, creating `pkg_log_dir` first.
+fn write_log_file(pkg_log_dir: &Path, log_path: &Path, log: &ConversationLog) -> Result<()> {
+    std::fs::create_dir_all(pkg_log_dir)
+        .with_context(|| format!("failed to create log directory {}", pkg_log_dir.display()))?;
+    let log_json = serde_json::to_string_pretty(log)?;
+    std::fs::write(log_path, log_json)
+        .with_context(|| format!("failed to write conversation log to {}", log_path.display()))?;
+    Ok(())
+}
+
+/// Best-effort write of the `Conversation` row (and optional embedding row for
+/// successful runs) into the SQLite index used by `kcl history` / `kcl remember`.
+///
+/// All failures produce only a warning on stderr; the user's harness answer is
+/// never affected. The embedding (if present) must already have been computed by
+/// the caller so that the short write transaction contains no network I/O.
+fn record_conversation_and_embedding(
+    db_path: &Path,
+    conversation: Conversation,
+    conv_id: &str,
+    embedding_row: Option<(String, usize, Vec<u8>, String)>,
+) {
+    match db::open(db_path) {
         Ok(mut conn) => match conn.transaction() {
             Ok(tx) => {
                 if let Err(e) = conversation.insert(&tx) {
                     eprintln!("warning: failed to record conversation in history: {:#}", e);
                 } else {
                     if let Some((model, dim, blob, created_at)) = embedding_row {
-                        const INSERT_EMBEDDING_SQL: &str = "INSERT OR REPLACE INTO conversation_embeddings (conversation_id, model, dim, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)";
+                        const INSERT_EMBEDDING_SQL: &str =
+                            "INSERT OR REPLACE INTO conversation_embeddings (conversation_id, model, dim, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)";
                         if let Err(e) = tx.execute(
                             INSERT_EMBEDDING_SQL,
-                            rusqlite::params![&conv_id, &model, dim as i64, blob, created_at],
+                            rusqlite::params![conv_id, &model, dim as i64, blob, created_at],
                         ) {
                             eprintln!("warning: failed to store question embedding: {:#}", e);
                         }
@@ -521,28 +557,6 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
             );
         }
     }
-
-    // Exit code semantics:
-    //   0 → harness succeeded
-    //   2 → harness terminated without a normal exit status (signal-killed,
-    //       spawn failure, timeout). Distinguished from harness errors because
-    //       the child did not get to report its own result.
-    //   3 → harness ran to completion but exited non-zero.
-    match exit_code {
-        Some(0) => Ok(0),
-        Some(_) => Ok(3),
-        None => Ok(2),
-    }
-}
-
-/// Serialize `log` and write it to `log_path`, creating `pkg_log_dir` first.
-fn write_log_file(pkg_log_dir: &Path, log_path: &Path, log: &ConversationLog) -> Result<()> {
-    std::fs::create_dir_all(pkg_log_dir)
-        .with_context(|| format!("failed to create log directory {}", pkg_log_dir.display()))?;
-    let log_json = serde_json::to_string_pretty(log)?;
-    std::fs::write(log_path, log_json)
-        .with_context(|| format!("failed to write conversation log to {}", log_path.display()))?;
-    Ok(())
 }
 
 /// Resolve the branch `kcl ask` (or `prepare`) should check out for this run.
