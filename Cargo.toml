@@ -1,6 +1,6 @@
 [package]
 name = "kcl"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 rust-version = "1.95"
 description = "Local Code Knowledge CLI — instant Q&A access to any codebase"
