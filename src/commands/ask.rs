@@ -437,8 +437,14 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
 
     // 7. Insert conversation index row into SQLite (must come *before* the
     //    embedding row because of the FK on conversation_embeddings).
-    //    We reopen the DB once, do both writes inside a transaction when
-    //    possible, and treat both as best-effort.
+    //    Persistence is best-effort only; we never fail the user's `kcl ask`
+    //    because recording failed.
+    //
+    //    The optional embedding is computed *before* we touch the database at
+    //    all. This keeps the (short) write transaction free of network I/O so
+    //    concurrent `kcl` processes are never blocked on an embedding provider
+    //    call. We then use rusqlite's `transaction()` helper so that any
+    //    failure path or panic automatically rolls back.
     let conversation = Conversation {
         id: conv_id.clone(),
         package_id: pkg.id.clone(),
@@ -452,8 +458,8 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
     };
 
     // Compute the optional embedding before starting any SQLite write
-    // transaction. The embedding call may perform network I/O; holding a DB
-    // write lock across that await would block unrelated kcl writers.
+    // transaction (or even before opening the DB). The embedding call may
+    // perform network I/O; we must not hold any write lock across the await.
     let embedding_row = if matches!(exit_code, Some(0)) {
         if let Some(emb_cfg) = EmbeddingConfig::load() {
             match embed_question(&emb_cfg, question).await {
@@ -461,6 +467,8 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
                     let dim = emb.len();
                     let blob = crate::embeddings::embedding_to_blob(&emb);
                     let created_at = Utc::now().to_rfc3339();
+                    // (model, dim, blob, created_at) tuple for the optional row.
+                    // `dim as i64` below is safe: embedding dimensions are tiny.
                     Some((emb_cfg.model, dim, blob, created_at))
                 }
                 Err(e) => {
@@ -496,6 +504,9 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
                             "warning: failed to commit conversation transaction: {:#}",
                             e
                         );
+                        // On failure the consumed Transaction's Drop performs a
+                        // ROLLBACK (default DropBehavior::Rollback). This is the
+                        // same effect the old manual ROLLBACK on error paths had.
                     }
                 }
             }
