@@ -451,34 +451,64 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         git_branch: current_branch,
     };
 
-    if let Ok(conn) = db::open(&db_path) {
-        // Best-effort transaction for atomicity of conv + embedding.
-        let _ = conn.execute("BEGIN IMMEDIATE", []);
-
-        if let Err(e) = conversation.insert(&conn) {
-            eprintln!("warning: failed to record conversation in history: {:#}", e);
-            let _ = conn.execute("ROLLBACK", []);
+    // Compute the optional embedding before starting any SQLite write
+    // transaction. The embedding call may perform network I/O; holding a DB
+    // write lock across that await would block unrelated kcl writers.
+    let embedding_row = if matches!(exit_code, Some(0)) {
+        if let Some(emb_cfg) = EmbeddingConfig::load() {
+            match embed_question(&emb_cfg, question).await {
+                Ok(emb) => {
+                    let dim = emb.len();
+                    let blob = crate::embeddings::embedding_to_blob(&emb);
+                    let created_at = Utc::now().to_rfc3339();
+                    Some((emb_cfg.model, dim, blob, created_at))
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to embed question for storage: {:#}", e);
+                    None
+                }
+            }
         } else {
-            // Now safe to insert the embedding (FK will hold).
-            if matches!(exit_code, Some(0)) {
-                if let Some(emb_cfg) = EmbeddingConfig::load() {
-                    if let Ok(emb) = embed_question(&emb_cfg, question).await {
-                        let dim = emb.len();
-                        let blob = crate::embeddings::embedding_to_blob(&emb);
-                        let created_at = Utc::now().to_rfc3339();
-                        if let Err(e) = conn.execute(
-                            "INSERT OR REPLACE INTO conversation_embeddings (conversation_id, model, dim, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                            rusqlite::params![&conv_id, &emb_cfg.model, dim as i64, blob, created_at],
+            None
+        }
+    } else {
+        None
+    };
+
+    match db::open(&db_path) {
+        Ok(mut conn) => match conn.transaction() {
+            Ok(tx) => {
+                if let Err(e) = conversation.insert(&tx) {
+                    eprintln!("warning: failed to record conversation in history: {:#}", e);
+                } else {
+                    if let Some((model, dim, blob, created_at)) = embedding_row {
+                        const INSERT_EMBEDDING_SQL: &str = "INSERT OR REPLACE INTO conversation_embeddings (conversation_id, model, dim, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)";
+                        if let Err(e) = tx.execute(
+                            INSERT_EMBEDDING_SQL,
+                            rusqlite::params![&conv_id, &model, dim as i64, blob, created_at],
                         ) {
                             eprintln!("warning: failed to store question embedding: {:#}", e);
                         }
                     }
+
+                    if let Err(e) = tx.commit() {
+                        eprintln!(
+                            "warning: failed to commit conversation transaction: {:#}",
+                            e
+                        );
+                    }
                 }
             }
-            let _ = conn.execute("COMMIT", []);
+            Err(e) => {
+                eprintln!("warning: failed to start conversation transaction: {:#}", e);
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "warning: failed to reopen database to record conversation: {:#}",
+                e
+            );
         }
-    } else {
-        eprintln!("warning: failed to reopen database to record conversation");
     }
 
     // Exit code semantics:
