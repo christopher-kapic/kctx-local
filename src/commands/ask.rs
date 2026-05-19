@@ -429,8 +429,7 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
             harness_name
         );
         // Make the persisted log self-explanatory rather than a silent "".
-        response_text =
-            "[error] harness exited 0 but produced an empty response".to_string();
+        response_text = "[error] harness exited 0 but produced an empty response".to_string();
         // Demote so every downstream consumer (log, history row, embedding
         // gate, exit code) sees a completed-but-failed run.
         exit_code = Some(3);

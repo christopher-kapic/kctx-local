@@ -165,13 +165,19 @@ pub fn build_prompt(
         // No prepared map: keep the original explore-everything wording.
         None => "Explore the codebase and answer precisely. Reference file paths.",
         // Fresh: map matches current HEAD. Trust it fully.
-        Some(MapFreshness::Fresh) => "Treat the prepared orientation map above as the authoritative primary source. Do NOT perform a broad tree scan: answer directly from the map, opening only files it points to or that are strictly necessary to answer. Reference file paths.",
+        Some(MapFreshness::Fresh) => {
+            "Treat the prepared orientation map above as the authoritative primary source. Do NOT perform a broad tree scan: answer directly from the map, opening only files it points to or that are strictly necessary to answer. Reference file paths."
+        }
         // Slightly stale: structure is still reliable; only verify the
         // handful of files plausibly touched by recent changes.
-        Some(MapFreshness::SlightlyStale) => "Treat the prepared orientation map above as the authoritative primary source. Do NOT perform a broad tree scan: trust the map's structure, but it is a few commits behind — additionally verify only the specific files plausibly affected by recent changes. Open only files the map points to or that are strictly necessary to answer. Reference file paths.",
+        Some(MapFreshness::SlightlyStale) => {
+            "Treat the prepared orientation map above as the authoritative primary source. Do NOT perform a broad tree scan: trust the map's structure, but it is a few commits behind — additionally verify only the specific files plausibly affected by recent changes. Open only files the map points to or that are strictly necessary to answer. Reference file paths."
+        }
         // Unknown or very stale: cautious fallback close to the original
         // explore behavior, but still let the map guide where to look.
-        Some(MapFreshness::Unknown) => "The prepared orientation map above may be stale. Use it as a starting guide, but explore the codebase to verify and answer precisely. Reference file paths.",
+        Some(MapFreshness::Unknown) => {
+            "The prepared orientation map above may be stale. Use it as a starting guide, but explore the codebase to verify and answer precisely. Reference file paths."
+        }
     };
 
     prompt.push_str(&format!("\nQuestion: {}\n\n{}\n", question, closing));
@@ -929,9 +935,11 @@ mod tests {
         assert!(prompt.contains("Key files: src/lib.rs"));
         assert!(prompt.contains("--- END PREPARED ORIENTATION MAP ---"));
         // Authoritative directive line injected at the top of the map block.
-        assert!(prompt.contains(
-            "This is an accurate, authoritative orientation for this exact codebase."
-        ));
+        assert!(
+            prompt.contains(
+                "This is an accurate, authoritative orientation for this exact codebase."
+            )
+        );
         // Fresh map (0 commits behind): trust fully, no tree scan.
         assert!(prompt.contains("Do NOT perform a broad tree scan"));
         assert!(prompt.contains("authoritative primary source"));
@@ -957,7 +965,9 @@ mod tests {
     #[test]
     fn prompt_closing_unconditional_when_no_map() {
         let prompt = build_prompt("Axum", "axum", "q", None, None, None, None, &[]);
-        assert!(prompt.contains("Explore the codebase and answer precisely. Reference file paths."));
+        assert!(
+            prompt.contains("Explore the codebase and answer precisely. Reference file paths.")
+        );
         assert!(!prompt.contains("authoritative primary source"));
     }
 

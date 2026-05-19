@@ -69,10 +69,7 @@ fn sanitize_map(raw: &str) -> String {
                 .first()
                 .map(|l| l.trim_start().starts_with("```"))
                 .unwrap_or(false)
-            && lines
-                .last()
-                .map(|l| l.trim() == "```")
-                .unwrap_or(false);
+            && lines.last().map(|l| l.trim() == "```").unwrap_or(false);
         if is_fenced {
             lines.remove(0);
             lines.pop();
