@@ -16,6 +16,8 @@ pub struct Conversation {
     pub exit_code: Option<i32>,
     pub log_path: String,
     pub created_at: DateTime<Utc>,
+    pub git_commit_sha: Option<String>,
+    pub git_branch: Option<String>,
 }
 
 impl Conversation {
@@ -27,6 +29,8 @@ impl Conversation {
         harness: String,
         exit_code: Option<i32>,
         log_path: String,
+        git_commit_sha: Option<String>,
+        git_branch: Option<String>,
     ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -36,14 +40,16 @@ impl Conversation {
             exit_code,
             log_path,
             created_at: Utc::now(),
+            git_commit_sha,
+            git_branch,
         }
     }
 
     /// Insert this conversation into the database.
     pub fn insert(&self, conn: &Connection) -> Result<()> {
         conn.execute(
-            "INSERT INTO conversations (id, package_id, question, harness, exit_code, log_path, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO conversations (id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 self.id,
                 self.package_id,
@@ -51,6 +57,8 @@ impl Conversation {
                 self.harness,
                 self.exit_code,
                 self.log_path,
+                self.git_commit_sha.clone(),
+                self.git_branch.clone(),
                 self.created_at.to_rfc3339(),
             ],
         )
@@ -62,7 +70,7 @@ impl Conversation {
     #[cfg(test)]
     pub fn list_by_package(conn: &Connection, package_id: &str) -> Result<Vec<Self>> {
         let mut stmt = conn.prepare(
-            "SELECT id, package_id, question, harness, exit_code, log_path, created_at
+            "SELECT id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at
              FROM conversations WHERE package_id = ?1 ORDER BY created_at DESC",
         )?;
 
@@ -108,7 +116,7 @@ impl Conversation {
                 let cutoff = Utc::now() - chrono::Duration::days(days as i64);
                 let cutoff_str = cutoff.to_rfc3339();
                 let mut stmt = conn.prepare(
-                    "SELECT id, package_id, question, harness, exit_code, log_path, created_at
+                    "SELECT id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at
                      FROM conversations WHERE package_id = ?1 AND created_at >= ?2
                      ORDER BY created_at DESC LIMIT ?3",
                 )?;
@@ -121,7 +129,7 @@ impl Conversation {
             }
             None => {
                 let mut stmt = conn.prepare(
-                    "SELECT id, package_id, question, harness, exit_code, log_path, created_at
+                    "SELECT id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at
                      FROM conversations WHERE package_id = ?1
                      ORDER BY created_at DESC LIMIT ?2",
                 )?;
@@ -139,7 +147,7 @@ impl Conversation {
     /// Retrieve a single conversation by its UUID.
     pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Self>> {
         let mut stmt = conn.prepare(
-            "SELECT id, package_id, question, harness, exit_code, log_path, created_at
+            "SELECT id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at
              FROM conversations WHERE id = ?1",
         )?;
 
@@ -150,8 +158,39 @@ impl Conversation {
         }
     }
 
+    /// Retrieve by exact ID or a unique short prefix (e.g. first 8 chars of UUID).
+    /// Errors with a clear message (using backticks) if the prefix matches >1 row.
+    /// This powers `kcl remember <short-id>`.
+    pub fn get_by_id_or_prefix(conn: &Connection, id_or_prefix: &str) -> Result<Option<Self>> {
+        // Fast path: exact match (handles full UUIDs or any exact id)
+        if let Some(c) = Self::get_by_id(conn, id_or_prefix)? {
+            return Ok(Some(c));
+        }
+
+        // Prefix search — UUIDs are lowercase hex, so prefix match is reliable.
+        let mut stmt = conn.prepare(
+            "SELECT id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at
+             FROM conversations WHERE id LIKE ?1 || '%' ORDER BY id",
+        )?;
+        let mut rows = stmt.query(params![id_or_prefix])?;
+
+        let mut matches = Vec::new();
+        while let Some(row) = rows.next()? {
+            matches.push(Self::from_row_inner(row)?);
+        }
+
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(Some(matches.into_iter().next().unwrap())),
+            n => anyhow::bail!(
+                "Conversation id prefix `{}` is ambiguous (matches {} conversations). Supply a longer prefix or the full ID.",
+                id_or_prefix, n
+            ),
+        }
+    }
+
     fn from_row_inner(row: &rusqlite::Row) -> Result<Self> {
-        let created_str: String = row.get(6)?;
+        let created_str: String = row.get(8)?;
         Ok(Self {
             id: row.get(0)?,
             package_id: row.get(1)?,
@@ -159,6 +198,8 @@ impl Conversation {
             harness: row.get(3)?,
             exit_code: row.get(4)?,
             log_path: row.get(5)?,
+            git_commit_sha: row.get(6)?,
+            git_branch: row.get(7)?,
             created_at: DateTime::parse_from_rfc3339(&created_str)
                 .context("invalid created_at")?
                 .with_timezone(&Utc),
@@ -182,6 +223,8 @@ mod tests {
             format!("/tmp/{identifier}"),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(conn).unwrap();
         pkg
@@ -198,6 +241,8 @@ mod tests {
             "claude".to_string(),
             Some(0),
             "/tmp/logs/conv1.json".to_string(),
+            None,
+            None,
         );
         conv1.insert(&conn).unwrap();
 
@@ -207,6 +252,8 @@ mod tests {
             "claude".to_string(),
             Some(0),
             "/tmp/logs/conv2.json".to_string(),
+            None,
+            None,
         );
         conv2.insert(&conn).unwrap();
 
@@ -228,6 +275,8 @@ mod tests {
             "copilot".to_string(),
             None,
             "/tmp/logs/conv3.json".to_string(),
+            None,
+            None,
         );
         conv.insert(&conn).unwrap();
 
@@ -261,6 +310,8 @@ mod tests {
             "claude".to_string(),
             Some(0),
             "/tmp/logs/cascade.json".to_string(),
+            None,
+            None,
         );
         conv.insert(&conn).unwrap();
 
@@ -284,9 +335,54 @@ mod tests {
             "claude".to_string(),
             Some(0),
             "/tmp/logs/orphan.json".to_string(),
+            None,
+            None,
         );
 
         // Should fail due to foreign key constraint.
         assert!(conv.insert(&conn).is_err());
+    }
+
+    #[test]
+    fn get_by_id_or_prefix_exact_and_short_unique() {
+        let conn = db::open_memory().unwrap();
+        let pkg = insert_test_package(&conn, "prefix-pkg");
+
+        let conv1 = Conversation::new(
+            pkg.id.clone(),
+            "q1".to_string(),
+            "claude".to_string(),
+            Some(0),
+            "/tmp/1.json".to_string(),
+            None,
+            None,
+        );
+        conv1.insert(&conn).unwrap();
+
+        let conv2 = Conversation::new(
+            pkg.id.clone(),
+            "q2".to_string(),
+            "claude".to_string(),
+            Some(0),
+            "/tmp/2.json".to_string(),
+            None,
+            None,
+        );
+        conv2.insert(&conn).unwrap();
+
+        // Exact full id works.
+        let by_full = Conversation::get_by_id_or_prefix(&conn, &conv1.id).unwrap().unwrap();
+        assert_eq!(by_full.id, conv1.id);
+
+        // Unique short prefix works (first 8 chars of a v4 uuid are almost always unique in tiny test set).
+        let short = &conv2.id[..8];
+        let by_short = Conversation::get_by_id_or_prefix(&conn, short).unwrap().unwrap();
+        assert_eq!(by_short.id, conv2.id);
+
+        // Non-existent prefix -> None.
+        assert!(Conversation::get_by_id_or_prefix(&conn, "deadbeef").unwrap().is_none());
+
+        // If we had ambiguity we would error, but with only two rows a colliding 1-char prefix is unlikely;
+        // we just assert the happy paths here.
     }
 }

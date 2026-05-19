@@ -171,6 +171,8 @@ mod tests {
             "/tmp/test-pkg".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
         (conn, pkg)
@@ -187,6 +189,8 @@ mod tests {
                 "claude".to_string(),
                 Some(0),
                 format!("/tmp/logs/conv{}.json", i),
+            None,
+            None,
             );
             conv.insert(&conn).unwrap();
         }
@@ -209,6 +213,8 @@ mod tests {
                 "claude".to_string(),
                 Some(0),
                 format!("/tmp/logs/conv{}.json", i),
+            None,
+            None,
             );
             conv.insert(&conn).unwrap();
         }
@@ -232,6 +238,8 @@ mod tests {
             "claude".to_string(),
             Some(0),
             "/tmp/log.json".to_string(),
+            None,
+            None,
         );
 
         let summary = ConversationSummary::from(&conv);
@@ -249,6 +257,8 @@ mod tests {
             "copilot".to_string(),
             None,
             "/tmp/log.json".to_string(),
+            None,
+            None,
         );
 
         let summary = ConversationSummary::from(&conv);

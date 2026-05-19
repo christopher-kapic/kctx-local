@@ -59,6 +59,18 @@ kcl ask hono "what about error handling?" --context 3
 kcl ask hono "trace the full request lifecycle" --timeout 300
 ```
 
+### 4. Pre-compute a compact orientation map (`kcl prepare`)
+
+For large or unfamiliar codebases, run `kcl prepare` once. It invokes the harness with a special high-density prompt and stores a token-efficient map (purpose, key dirs, entry points, data layer, build commands, "when you need X look in Y", invariants). The map is later injected into `kcl ask` prompts, dramatically reducing the agent's initial exploration.
+
+```bash
+kcl prepare my-large-app
+kcl prepare my-large-app --branch feature-x   # map scoped to that branch (if package prepare-scope=branch)
+kcl packages set my-large-app prepare-scope branch
+```
+
+Re-run after major refactors. Use `--harness`, `--model`, `--no-pull`, `--timeout`, `--branch` exactly as with `ask`.
+
 ## Interpreting results
 
 - **Exit code 0** — success, the harness answered the question

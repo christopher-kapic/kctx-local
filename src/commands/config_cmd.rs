@@ -43,6 +43,14 @@ fn format_human(config: &Config) -> String {
     writeln!(out, "default_harness:  {}", config.default_harness).unwrap();
     writeln!(out, "default_timeout:  {}", config.default_timeout).unwrap();
 
+    if let Some(e) = &config.embeddings {
+        writeln!(out, "embeddings:").unwrap();
+        writeln!(out, "  provider:  {}", e.provider).unwrap();
+        writeln!(out, "  model:     {}", e.model).unwrap();
+    } else {
+        writeln!(out, "embeddings:       (disabled)").unwrap();
+    }
+
     if config.harnesses.is_empty() {
         writeln!(out, "harnesses:        (none configured)").unwrap();
         return out;
@@ -161,6 +169,18 @@ fn apply_set(path: &Path, key: &str, value: &str) -> Result<()> {
             crate::config::validate_timeout(timeout)?;
             config.default_timeout = timeout;
         }
+        "embeddings.provider" => {
+            let p: crate::config::EmbeddingProvider = value.parse()?;
+            let emb = config.embeddings.get_or_insert_with(Default::default);
+            emb.provider = p;
+        }
+        "embeddings.model" => {
+            let emb = config.embeddings.get_or_insert_with(Default::default);
+            if value.is_empty() {
+                bail!("embeddings.model must not be empty");
+            }
+            emb.model = value.to_string();
+        }
         _ if key.starts_with("harnesses.") => {
             // Support dot-notation for harness properties:
             //   harnesses.<name>.command
@@ -233,7 +253,7 @@ fn apply_set(path: &Path, key: &str, value: &str) -> Result<()> {
         }
         _ => {
             bail!(
-                "Unknown config key `{}`. Valid keys: clone_dir, default_harness, default_timeout, harnesses.<name>.<property>",
+                "Unknown config key `{}`. Valid keys: clone_dir, default_harness, default_timeout, embeddings.provider, embeddings.model, harnesses.<name>.<property>",
                 key
             );
         }

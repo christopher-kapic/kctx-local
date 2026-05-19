@@ -130,6 +130,7 @@ mod tests {
             default_harness: "claude".to_string(),
             default_timeout: 120,
             harnesses,
+            embeddings: None,
         }
     }
 

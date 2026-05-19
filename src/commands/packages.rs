@@ -31,6 +31,18 @@ struct ExportEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     harness: Option<String>,
     auto_pull: bool,
+    /// Whether the package was registered with `--shallow`.
+    /// Defaults to false for backward-compatible manifests (old exports).
+    #[serde(default)]
+    shallow: bool,
+    /// prepare-scope at export time ("global" or "branch").
+    /// Defaults to "global" so old manifests continue to import cleanly.
+    #[serde(default = "default_prepare_scope")]
+    prepare_scope: String,
+}
+
+fn default_prepare_scope() -> String {
+    "global".to_string()
 }
 
 /// Helper to open the database from the default location.
@@ -47,12 +59,14 @@ pub async fn run(command: &PackagesCommand) -> Result<()> {
             path,
             git,
             branch,
+            shallow,
         } => {
             cmd_add(
                 identifier,
                 path.as_deref(),
                 git.as_deref(),
                 branch.as_deref(),
+                *shallow,
             )
             .await
         }
@@ -116,6 +130,7 @@ async fn cmd_add(
     path: Option<&str>,
     git: Option<&str>,
     branch: Option<&str>,
+    shallow: bool,
 ) -> Result<()> {
     validate_identifier(identifier)?;
 
@@ -196,7 +211,7 @@ async fn cmd_add(
                     "existing clone at {} was removed; re-cloning (originally registered as `{}`)",
                     existing.path, existing.identifier
                 );
-                if let Err(e) = git::clone(git_url, &pkg_dir, branch).await {
+                if let Err(e) = git::clone(git_url, &pkg_dir, branch, shallow).await {
                     if pkg_dir.exists()
                         && let Err(cleanup_err) = std::fs::remove_dir_all(&pkg_dir)
                     {
@@ -237,7 +252,7 @@ async fn cmd_add(
             }
 
             eprintln!("cloning {} ...", git_url);
-            if let Err(e) = git::clone(git_url, &pkg_dir, branch).await {
+            if let Err(e) = git::clone(git_url, &pkg_dir, branch, shallow).await {
                 // Clean up partial clone directory so a retry doesn't hit
                 // "clone target already exists".
                 if pkg_dir.exists()
@@ -275,6 +290,7 @@ async fn cmd_add(
         (SourceType::Local, None, None, abs, false)
     };
 
+    let effective_shallow = shallow && matches!(source_type, SourceType::Git);
     let pkg = Package::new(
         identifier.to_string(),
         identifier.to_string(),
@@ -284,6 +300,8 @@ async fn cmd_add(
         resolved_path,
         auto_pull,
         None,
+        effective_shallow,
+        "global".to_string(), // default; user can change with `kcl packages set <id> prepare-scope branch`
     );
 
     pkg.insert(&conn)?;
@@ -464,6 +482,14 @@ fn cmd_show(identifier: &str, json: bool) -> Result<()> {
         if let Some(harness) = &pkg.harness {
             println!("harness:       {harness}");
         }
+        println!("shallow:       {}", pkg.shallow);
+        if pkg.shallow {
+            println!("               (note: history truncated; older commits/versions unavailable until `git fetch --deepen=N` inside the clone dir)");
+        }
+        println!("prepare_scope: {}", pkg.prepare_scope);
+        if pkg.prepare_scope == "branch" {
+            println!("               (per-branch prepared contexts; run `kcl prepare --branch <name>` to (re)generate for a specific branch)");
+        }
         println!("created_at:    {}", pkg.created_at);
         println!("updated_at:    {}", pkg.updated_at);
     }
@@ -555,8 +581,20 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
                 pkg.harness = Some(val.to_string());
             }
         }
+        "prepare-scope" => {
+            if unset {
+                bail!("cannot unset prepare-scope; use `global` or `branch`");
+            }
+            let val = value.ok_or_else(|| anyhow::anyhow!("missing value for prepare-scope"))?;
+            match val {
+                "global" | "branch" => pkg.prepare_scope = val.to_string(),
+                other => {
+                    bail!("invalid value for prepare-scope: `{other}` (expected `global` or `branch`)")
+                }
+            }
+        }
         other => {
-            bail!("Unknown property `{other}`. Valid properties: auto-pull, harness.");
+            bail!("Unknown property `{other}`. Valid properties: auto-pull, harness, prepare-scope.");
         }
     }
 
@@ -577,6 +615,8 @@ fn build_manifest(packages: &[Package]) -> (ExportManifest, Vec<String>) {
                     branch: pkg.source_branch.clone(),
                     harness: pkg.harness.clone(),
                     auto_pull: pkg.auto_pull,
+                    shallow: pkg.shallow,
+                    prepare_scope: pkg.prepare_scope.clone(),
                 });
             }
             _ => skipped_local.push(pkg.identifier.clone()),
@@ -678,6 +718,7 @@ async fn cmd_import(file: Option<&str>) -> Result<()> {
             None,
             Some(&entry.git),
             entry.branch.as_deref(),
+            entry.shallow, // preserves shallow flag from the exported manifest (defaults to false for old manifests)
         )
         .await
         {
@@ -691,6 +732,16 @@ async fn cmd_import(file: Option<&str>) -> Result<()> {
                         pkg.auto_pull = entry.auto_pull;
                         pkg.harness = entry.harness.clone();
                         pkg.update(&conn)?;
+                    }
+                }
+                // Always apply prepare_scope from manifest (defaults to global for old manifests).
+                {
+                    let conn = open_db()?;
+                    if let Some(mut pkg) = Package::get_by_identifier(&conn, &entry.identifier)? {
+                        if pkg.prepare_scope != entry.prepare_scope {
+                            pkg.prepare_scope = entry.prepare_scope.clone();
+                            pkg.update(&conn)?;
+                        }
                     }
                 }
                 added += 1;
@@ -727,6 +778,8 @@ mod tests {
             "/tmp/testpkg".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
         (conn, pkg)
@@ -770,6 +823,8 @@ mod tests {
             "/tmp/other".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         let result = dup.insert(&conn);
         assert!(result.is_err());
@@ -854,6 +909,8 @@ mod tests {
             "/clones/monorepo".to_string(),
             true,
             None,
+            false,
+            "global".to_string(),
         );
         first.insert(&conn).unwrap();
 
@@ -873,6 +930,8 @@ mod tests {
             existing.path.clone(),
             true,
             None,
+            false,
+            "global".to_string(),
         );
         second.insert(&conn).unwrap();
 
@@ -999,6 +1058,8 @@ mod tests {
             shared_path.clone(),
             true,
             None,
+            false,
+            "global".to_string(),
         );
         app_a.insert(&conn).unwrap();
 
@@ -1011,6 +1072,8 @@ mod tests {
             shared_path.clone(),
             true,
             None,
+            false,
+            "global".to_string(),
         );
         app_b.insert(&conn).unwrap();
 
@@ -1081,6 +1144,8 @@ mod tests {
             format!("/clones/{identifier}"),
             true,
             None,
+            false,
+            "global".to_string(),
         )
     }
 
@@ -1095,6 +1160,8 @@ mod tests {
             "/some/path".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         let git = git_package("axum", "https://github.com/tokio-rs/axum.git", Some("main"));
 
@@ -1216,6 +1283,8 @@ mod tests {
             branch: None,
             harness: Some("nonexistent".to_string()),
             auto_pull: true,
+            shallow: false,
+            prepare_scope: "global".to_string(),
         };
 
         let err = validate_import_entry_harness(&config, &entry).unwrap_err();
@@ -1248,6 +1317,8 @@ mod tests {
             branch: None,
             harness: Some("claude".to_string()),
             auto_pull: true,
+            shallow: false,
+            prepare_scope: "global".to_string(),
         };
 
         validate_import_entry_harness(&config, &entry).unwrap();
@@ -1266,6 +1337,8 @@ mod tests {
             branch: None,
             harness: None,
             auto_pull: true,
+            shallow: false,
+            prepare_scope: "global".to_string(),
         };
         validate_import_entry_harness(&config, &entry).unwrap();
     }

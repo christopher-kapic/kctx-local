@@ -7,6 +7,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::config::{HarnessConfig, PromptMode};
+use crate::embeddings::SimilarMemory;
+use crate::models::prepared_context::PreparedContext;
 
 /// The result of running a harness subprocess.
 #[derive(Debug)]
@@ -22,22 +24,18 @@ pub struct HarnessOutput {
 
 /// Build the prompt string sent to the harness.
 ///
-/// Template from the design spec:
-/// ```text
-/// You are answering a question about the {display_name} ({identifier}) codebase.
-/// The codebase is in your current working directory.
-///
-/// [optional context block]
-///
-/// Question: {question}
-///
-/// Explore the codebase and answer precisely. Reference file paths.
-/// ```
+/// The two new blocks (prepared map + similar memories) are injected near the
+/// top so the agent sees high-signal orientation and provenance hints first.
+/// Delimiters are chosen to be obvious to both humans and LLM agents.
 pub fn build_prompt(
     display_name: &str,
     identifier: &str,
     question: &str,
     context: Option<&[String]>,
+    prepared: Option<&PreparedContext>,
+    current_commit_sha: Option<&str>,
+    commits_behind: Option<usize>,
+    similars: &[SimilarMemory],
 ) -> String {
     let mut prompt = format!(
         concat!(
@@ -47,6 +45,47 @@ pub fn build_prompt(
         display_name, identifier
     );
 
+    // 1. Prepared orientation map block (if present).
+    if let Some(p) = prepared {
+        let ts = p.created_at.to_rfc3339();
+        let rec = p.git_commit_sha.as_deref().unwrap_or("unknown");
+        let cur = current_commit_sha.unwrap_or("unknown");
+        let behind = commits_behind
+            .map(|n| if n == 0 { String::new() } else { format!(", {} commits behind", n) })
+            .unwrap_or_default();
+        let scope = &p.prepare_scope_at_time;
+
+        let header = format!(
+            "Prepared at {} on commit `{}` (current HEAD `{}`{}). Scope: `{}`",
+            ts, rec, cur, behind, scope
+        );
+
+        prompt.push_str("\n--- BEGIN PREPARED ORIENTATION MAP ---\n");
+        prompt.push_str(&header);
+        prompt.push('\n');
+        prompt.push_str(&p.content);
+        if !p.content.ends_with('\n') {
+            prompt.push('\n');
+        }
+        prompt.push_str("--- END PREPARED ORIENTATION MAP ---\n");
+    }
+
+    // 2. Similar past questions (semantic memory hints).
+    if !similars.is_empty() {
+        prompt.push_str("\n--- BEGIN SIMILAR PAST QUESTIONS ---\n");
+        prompt.push_str("You have answered highly similar questions before. Retrieve the prior full answers (including file references and provenance) with `kcl remember` to avoid redundant exploration:\n");
+        for m in similars {
+            // Use short id (first 8 chars) for the suggestion, as returned by find_similar.
+            let short = if m.id.len() > 8 { &m.id[..8] } else { &m.id };
+            prompt.push_str(&format!(
+                "- {:.2} similar: \"{}\"   `kcl remember {}`\n",
+                m.similarity, m.question, short
+            ));
+        }
+        prompt.push_str("--- END SIMILAR PAST QUESTIONS ---\n");
+    }
+
+    // 3. Existing recent-questions context (unchanged behavior).
     if let Some(recent_questions) = context
         && !recent_questions.is_empty()
     {
@@ -338,7 +377,7 @@ mod tests {
 
     #[test]
     fn prompt_builder_basic() {
-        let prompt = build_prompt("Axum", "axum", "How does routing work?", None);
+        let prompt = build_prompt("Axum", "axum", "How does routing work?", None, None, None, None, &[]);
 
         assert!(prompt.contains("Axum (axum)"));
         assert!(prompt.contains("Question: How does routing work?"));
@@ -346,6 +385,9 @@ mod tests {
         assert!(prompt.contains("current working directory"));
         // Should NOT contain context block
         assert!(!prompt.contains("Recent questions"));
+        // No prepared/similar blocks when absent
+        assert!(!prompt.contains("PREPARED ORIENTATION MAP"));
+        assert!(!prompt.contains("SIMILAR PAST QUESTIONS"));
     }
 
     #[test]
@@ -354,7 +396,7 @@ mod tests {
             "How do middleware work?".to_string(),
             "What extractors are available?".to_string(),
         ];
-        let prompt = build_prompt("Axum", "axum", "How does routing work?", Some(&recent));
+        let prompt = build_prompt("Axum", "axum", "How does routing work?", Some(&recent), None, None, None, &[]);
 
         assert!(prompt.contains("Axum (axum)"));
         assert!(prompt.contains("Question: How does routing work?"));
@@ -366,7 +408,7 @@ mod tests {
     #[test]
     fn prompt_builder_with_empty_context() {
         let recent: Vec<String> = vec![];
-        let prompt = build_prompt("Axum", "axum", "How does routing work?", Some(&recent));
+        let prompt = build_prompt("Axum", "axum", "How does routing work?", Some(&recent), None, None, None, &[]);
 
         // Empty context list should not produce the context block
         assert!(!prompt.contains("Recent questions"));
@@ -592,5 +634,62 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
+    }
+
+    // ---------- new prompt injection tests for prepared maps + similar memories ----------
+
+    #[test]
+    fn prompt_injects_prepared_map_block_with_staleness() {
+        use chrono::Utc;
+        let p = PreparedContext {
+            id: "p1".into(),
+            package_id: "pkg".into(),
+            content: "Key files: src/lib.rs\nStart here for routing.".into(),
+            created_at: Utc::now(),
+            harness: "claude".into(),
+            model: None,
+            git_commit_sha: Some("abc123def456".into()),
+            git_branch: None,
+            prepare_scope_at_time: "global".into(),
+        };
+        let prompt = build_prompt(
+            "Axum",
+            "axum",
+            "How does X work?",
+            None,
+            Some(&p),
+            Some("abc123def456"),
+            Some(0),
+            &[],
+        );
+
+        assert!(prompt.contains("--- BEGIN PREPARED ORIENTATION MAP ---"));
+        assert!(prompt.contains("Prepared at "));
+        assert!(prompt.contains("on commit `abc123def456` (current HEAD `abc123def456`). Scope: `global`"));
+        assert!(prompt.contains("Key files: src/lib.rs"));
+        assert!(prompt.contains("--- END PREPARED ORIENTATION MAP ---"));
+    }
+
+    #[test]
+    fn prompt_injects_similar_memories_with_remember_hints() {
+        let mems = vec![
+            SimilarMemory {
+                id: "a1b2c3d4-1111-2222-3333-444455556666".into(),
+                question: "How does routing work?".into(),
+                similarity: 0.91,
+            },
+            SimilarMemory {
+                id: "deadbeef".into(),
+                question: "router extractors".into(),
+                similarity: 0.82,
+            },
+        ];
+        let prompt = build_prompt("Axum", "axum", "routing q", None, None, None, None, &mems);
+
+        assert!(prompt.contains("--- BEGIN SIMILAR PAST QUESTIONS ---"));
+        assert!(prompt.contains("`kcl remember a1b2c3d4`"));
+        assert!(prompt.contains("0.91 similar: \"How does routing work?\""));
+        assert!(prompt.contains("`kcl remember deadbeef`"));
+        assert!(prompt.contains("--- END SIMILAR PAST QUESTIONS ---"));
     }
 }

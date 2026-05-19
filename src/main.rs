@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod config;
+mod embeddings;
 mod db;
 mod git;
 mod harness;
@@ -56,6 +57,10 @@ async fn main() {
         Command::Harnesses { command } => commands::harnesses::run(command).map(|()| 0),
 
         Command::Init { non_interactive } => commands::init::run(*non_interactive).map(|()| 0),
+
+        // New intelligence commands (prepare map + semantic memory recall)
+        c @ Command::Prepare { .. } => commands::prepare::run(c).await,
+        c @ Command::Remember { .. } => commands::remember::run(c).map(|()| 0),
     };
 
     match result {

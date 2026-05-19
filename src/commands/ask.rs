@@ -6,29 +6,44 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::db;
+use crate::embeddings::{embed_question, find_similar_questions, EmbeddingConfig, SimilarMemory};
 use crate::git;
 use crate::git::HeadState;
 use crate::harness;
 use crate::models::conversation::Conversation;
 use crate::models::package::{Package, SourceType};
+use crate::models::prepared_context::PreparedContext;
 use crate::paths;
 
 /// The JSON log file written to disk for each conversation.
 #[derive(Debug, Serialize, Deserialize)]
-struct ConversationLog {
-    id: String,
-    package_id: String,
-    package_identifier: String,
-    question: String,
-    harness: String,
+pub(crate) struct ConversationLog {
+    pub(crate) id: String,
+    pub(crate) package_id: String,
+    pub(crate) package_identifier: String,
+    pub(crate) question: String,
+    pub(crate) harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    started_at: String,
-    finished_at: String,
-    exit_code: Option<i32>,
-    response: String,
+    pub(crate) model: Option<String>,
+    pub(crate) started_at: String,
+    pub(crate) finished_at: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) response: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pull_error: Option<String>,
+    pub(crate) pull_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) git_commit_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) git_branch: Option<String>,
+    /// The value of the package's `prepare_scope` ("global" or "branch") at
+    /// the moment this `ask` was performed. Used by `kcl remember` for
+    /// provenance reporting.
+    #[serde(default = "default_prepare_scope")]
+    pub(crate) prepare_scope: String,
+}
+
+fn default_prepare_scope() -> String {
+    "global".to_string()
 }
 
 /// Arguments for a single `kcl ask` invocation.
@@ -68,6 +83,10 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
             identifier
         )
     })?;
+    // `pkg.shallow` is recorded at registration time. It currently only affects
+    // the initial `git clone` (see git.rs). It is not yet used to change
+    // harness invocation or prompt construction; the known history-truncation
+    // limitation of shallow clones applies to all operations on the package.
 
     // Drop the connection below once we've finished all DB reads (step 4) so
     // it isn't held open for the duration of the harness run, which could
@@ -255,7 +274,66 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         }
     }
 
-    // 4. Build prompt with optional context.
+    // 4. Capture provenance and load prepared map + semantic similar memories
+    //    *after* any checkout/pull so we record the exact state the harness sees.
+    let current_head_sha: Option<String> = if pkg.source_type == SourceType::Git {
+        git::current_commit_sha(repo_path).await.ok()
+    } else {
+        None
+    };
+    let current_branch: Option<String> = if pkg.source_type == SourceType::Git {
+        git::current_branch(repo_path).await.ok().flatten()
+    } else {
+        None
+    };
+
+    // Load the applicable prepared orientation map (global vs per-branch)
+    // using the getters provided by the model. Errors are ignored (graceful).
+    let prepared_context: Option<PreparedContext> = if pkg.wants_per_branch_prepare() {
+        if let Some(ref br) = current_branch {
+            PreparedContext::get_latest_for_package_and_branch(&conn, &pkg.id, br)
+                .ok()
+                .flatten()
+        } else {
+            PreparedContext::get_latest_for_package(&conn, &pkg.id)
+                .ok()
+                .flatten()
+        }
+    } else {
+        PreparedContext::get_latest_for_package(&conn, &pkg.id)
+            .ok()
+            .flatten()
+    };
+
+    // Pre-compute staleness distance while we are still async (git helper).
+    let commits_behind: Option<usize> = if let (Some(p), Some(cur)) = (&prepared_context, &current_head_sha) {
+        if let Some(rec) = &p.git_commit_sha {
+            git::commit_count_between(repo_path, rec, cur).await.ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // If embeddings configured, embed the current question and find similar
+    // prior conversations (same model+dim). Top 3 above 0.80 cosine.
+    let similar_memories: Vec<SimilarMemory> = if let Some(emb_cfg) = EmbeddingConfig::load() {
+        match embed_question(&emb_cfg, question).await {
+            Ok(emb) => {
+                let dim = emb.len();
+                find_similar_questions(&conn, &pkg.id, &emb, &emb_cfg.model, dim, 3, 0.80)
+            }
+            Err(e) => {
+                eprintln!("warning: failed to embed question for similarity search: {:#}", e);
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // 5. Build prompt (now receives prepared map + similar-memory hints).
     let recent_questions = if context > 0 {
         Conversation::recent_questions(&conn, &pkg.id, context)?
     } else {
@@ -268,7 +346,16 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         Some(recent_questions.as_slice())
     };
 
-    let prompt = harness::build_prompt(&pkg.display_name, &pkg.identifier, question, context_slice);
+    let prompt = harness::build_prompt(
+        &pkg.display_name,
+        &pkg.identifier,
+        question,
+        context_slice,
+        prepared_context.as_ref(),
+        current_head_sha.as_deref(),
+        commits_behind,
+        &similar_memories,
+    );
 
     // Release the DB connection before the long-running harness invocation so
     // it doesn't hold WAL locks (or `busy_timeout` slots) while other `kcl`
@@ -332,6 +419,9 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         exit_code,
         response: response_text,
         pull_error,
+        git_commit_sha: current_head_sha.clone(),
+        git_branch: current_branch.clone(),
+        prepare_scope: pkg.prepare_scope.clone(),
     };
 
     // Best-effort: the user has already received the harness response, so a
@@ -345,31 +435,50 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         );
     }
 
-    // 7. Insert conversation index row into SQLite. Reopen the connection now
-    //    that the harness has finished so we don't hold it open across the run.
-    //    Best-effort: the user has already received the harness response, so a
-    //    failure to persist the index row should not fail the command.
+    // 7. Insert conversation index row into SQLite (must come *before* the
+    //    embedding row because of the FK on conversation_embeddings).
+    //    We reopen the DB once, do both writes inside a transaction when
+    //    possible, and treat both as best-effort.
     let conversation = Conversation {
-        id: conv_id,
+        id: conv_id.clone(),
         package_id: pkg.id.clone(),
         question: question.to_string(),
         harness: harness_name,
         exit_code,
         log_path: relative_log_path,
         created_at: started_at,
+        git_commit_sha: current_head_sha,
+        git_branch: current_branch,
     };
-    match db::open(&db_path) {
-        Ok(conn) => {
-            if let Err(e) = conversation.insert(&conn) {
-                eprintln!("warning: failed to record conversation in history: {:#}", e);
+
+    if let Ok(conn) = db::open(&db_path) {
+        // Best-effort transaction for atomicity of conv + embedding.
+        let _ = conn.execute("BEGIN IMMEDIATE", []);
+
+        if let Err(e) = conversation.insert(&conn) {
+            eprintln!("warning: failed to record conversation in history: {:#}", e);
+            let _ = conn.execute("ROLLBACK", []);
+        } else {
+            // Now safe to insert the embedding (FK will hold).
+            if matches!(exit_code, Some(0)) {
+                if let Some(emb_cfg) = EmbeddingConfig::load() {
+                    if let Ok(emb) = embed_question(&emb_cfg, question).await {
+                        let dim = emb.len();
+                        let blob = crate::embeddings::embedding_to_blob(&emb);
+                        let created_at = Utc::now().to_rfc3339();
+                        if let Err(e) = conn.execute(
+                            "INSERT OR REPLACE INTO conversation_embeddings (conversation_id, model, dim, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                            rusqlite::params![&conv_id, &emb_cfg.model, dim as i64, blob, created_at],
+                        ) {
+                            eprintln!("warning: failed to store question embedding: {:#}", e);
+                        }
+                    }
+                }
             }
+            let _ = conn.execute("COMMIT", []);
         }
-        Err(e) => {
-            eprintln!(
-                "warning: failed to reopen database to record conversation: {:#}",
-                e
-            );
-        }
+    } else {
+        eprintln!("warning: failed to reopen database to record conversation");
     }
 
     // Exit code semantics:
@@ -395,12 +504,12 @@ fn write_log_file(pkg_log_dir: &Path, log_path: &Path, log: &ConversationLog) ->
     Ok(())
 }
 
-/// Resolve the branch `kcl ask` should check out for this run.
+/// Resolve the branch `kcl ask` (or `prepare`) should check out for this run.
 ///
 /// CLI `--branch` always wins over the package's pinned `source_branch`. If
 /// neither is set, returns `None` and the package's current HEAD is left
 /// untouched.
-fn resolve_target_branch<'a>(
+pub(crate) fn resolve_target_branch<'a>(
     branch_override: Option<&'a str>,
     pkg_source_branch: Option<&'a str>,
 ) -> Option<&'a str> {
@@ -412,7 +521,7 @@ fn resolve_target_branch<'a>(
 /// Failures are logged to stderr but never propagated — the harness has
 /// already produced its result and the user shouldn't see a successful
 /// answer turn into a failed exit code just because git was unhappy.
-async fn restore_head(repo_path: &Path, head: &HeadState) {
+pub(crate) async fn restore_head(repo_path: &Path, head: &HeadState) {
     let target_desc = match head {
         HeadState::Branch(name) => format!("branch `{}`", name),
         HeadState::Detached(sha) => format!("detached at `{}`", &sha[..sha.len().min(8)]),
@@ -450,6 +559,9 @@ mod tests {
             exit_code: Some(0),
             response: "Routing in axum uses...".to_string(),
             pull_error: None,
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -478,6 +590,9 @@ mod tests {
             exit_code: None,
             response: "output".to_string(),
             pull_error: None,
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -499,6 +614,8 @@ mod tests {
             "/tmp/test-ctx".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
 
@@ -510,6 +627,8 @@ mod tests {
                 "claude".to_string(),
                 Some(0),
                 format!("/tmp/logs/conv{}.json", i),
+                None,
+                None,
             );
             conv.insert(&conn).unwrap();
         }
@@ -537,6 +656,9 @@ mod tests {
             exit_code: None,
             response: "[error] harness timed out after 120s".to_string(),
             pull_error: None,
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -560,6 +682,8 @@ mod tests {
             "/tmp/fail-pkg".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
 
@@ -569,6 +693,8 @@ mod tests {
             "claude".to_string(),
             None,
             "/tmp/logs/fail.json".to_string(),
+            None,
+            None,
         );
         conv.insert(&conn).unwrap();
 
@@ -593,6 +719,9 @@ mod tests {
             exit_code: Some(0),
             response: "Routing in axum uses...".to_string(),
             pull_error: Some("pull failed for axum: remote unreachable".to_string()),
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -625,6 +754,9 @@ mod tests {
             exit_code: Some(0),
             response: "ok".to_string(),
             pull_error: None,
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -644,6 +776,8 @@ mod tests {
             "/tmp/hono".to_string(),
             true,
             None,
+            false,
+            "global".to_string(),
         );
 
         // No CLI override: fall back to the package's pinned branch.
@@ -677,6 +811,8 @@ mod tests {
             "/tmp/empty-pkg".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
 

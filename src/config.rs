@@ -22,6 +22,13 @@ pub struct Config {
     /// Map of harness name to harness definition.
     #[serde(default)]
     pub harnesses: HashMap<String, HarnessConfig>,
+
+    /// Optional embedding configuration for semantic question memory
+    /// (`kcl remember` hints during `ask`). When absent, the feature is
+    /// completely disabled. The API key is always sourced from the
+    /// environment, never from this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embeddings: Option<EmbeddingConfig>,
 }
 
 /// A harness definition — an external coding agent invoked as a subprocess.
@@ -59,6 +66,69 @@ pub struct HarnessConfig {
     pub default_model: Option<String>,
 }
 
+/// Supported embedding providers for the semantic question-memory feature.
+/// The API key is **never** stored in the config file — it is always read
+/// from the standard environment variable at call time (`OPENAI_API_KEY` or
+/// `OPENROUTER_API_KEY`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingProvider {
+    Openai,
+    Openrouter,
+}
+
+impl std::fmt::Display for EmbeddingProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmbeddingProvider::Openai => write!(f, "openai"),
+            EmbeddingProvider::Openrouter => write!(f, "openrouter"),
+        }
+    }
+}
+
+impl EmbeddingProvider {
+    /// Lower-case identifier used in config files and error messages.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EmbeddingProvider::Openai => "openai",
+            EmbeddingProvider::Openrouter => "openrouter",
+        }
+    }
+}
+
+impl std::str::FromStr for EmbeddingProvider {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "openai" => Ok(EmbeddingProvider::Openai),
+            "openrouter" => Ok(EmbeddingProvider::Openrouter),
+            other => anyhow::bail!(
+                "unknown embedding provider `{other}` (expected `openai` or `openrouter`)"
+            ),
+        }
+    }
+}
+
+/// Configuration for optional question embeddings (powers `kcl remember` hints).
+/// When `None`, the semantic memory feature is disabled for all packages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmbeddingConfig {
+    pub provider: EmbeddingProvider,
+    /// The exact model identifier sent to the /v1/embeddings endpoint
+    /// (e.g. "text-embedding-3-small", "openai/text-embedding-3-small").
+    pub model: String,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            provider: EmbeddingProvider::Openai,
+            model: "text-embedding-3-small".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptMode {
@@ -79,6 +149,14 @@ pub fn validate_timeout(seconds: u64) -> Result<()> {
             MIN_TIMEOUT,
             seconds
         );
+    }
+    Ok(())
+}
+
+/// Validate an `EmbeddingConfig` (called from `Config::load` and from `kcl config set` / `kcl init`).
+pub fn validate_embedding_config(cfg: &EmbeddingConfig) -> Result<()> {
+    if cfg.model.trim().is_empty() {
+        anyhow::bail!("`model` must not be empty in embeddings config");
     }
     Ok(())
 }
@@ -126,6 +204,7 @@ impl Default for Config {
             default_harness: "claude".to_string(),
             default_timeout: default_timeout(),
             harnesses: HashMap::new(),
+            embeddings: None,
         }
     }
 }
@@ -142,6 +221,9 @@ impl Config {
         let config: Config = serde_json::from_str(&contents)
             .with_context(|| format!("parsing {}", path.display()))?;
         validate_timeout(config.default_timeout)?;
+        if let Some(ref emb) = config.embeddings {
+            validate_embedding_config(emb)?;
+        }
         Ok(config)
     }
 

@@ -547,6 +547,7 @@ mod tests {
                 );
                 m
             },
+            embeddings: None,
         };
 
         let mut new_harnesses = HashMap::new();
@@ -591,6 +592,7 @@ mod tests {
             default_harness: "nonexistent".to_string(),
             default_timeout: 120,
             harnesses: HashMap::new(),
+            embeddings: None,
         };
 
         let mut new_harnesses = HashMap::new();

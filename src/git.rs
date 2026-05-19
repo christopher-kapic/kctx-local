@@ -11,9 +11,24 @@ fn check_git() -> Result<()> {
 
 /// Clone a git repository to the target directory.
 ///
-/// Shells out to `git clone <url> [--branch <branch>] <target_dir>`.
+/// When `shallow` is true, emits:
+///   git clone --depth 1 --no-single-branch [--branch <branch>] <url> <target_dir>
+///
+/// The `--no-single-branch` flag is **critical**: without it a shallow clone
+/// would only fetch the requested branch (or default), making later
+/// `git::checkout(other_branch)` or `kcl ask --branch foo` fail or require
+/// expensive unshallowing. With it, other branches remain fetchable (still
+/// shallowly, depth 1 from their tips at fetch time).
+///
+/// The known limitation (documented to users): only the tip commit of each
+/// fetched branch is present. Checking out "older versions" / arbitrary
+/// historical commits is not possible until the user manually deepens
+/// (`git fetch --deepen=N` or `git fetch --unshallow` in the clone dir).
+/// `git log`, blame, etc. on pre-tip history will be truncated or fail.
+/// This is the accepted disk-space vs. history tradeoff for `--shallow`.
+///
 /// Creates parent directories as needed.
-pub async fn clone(url: &str, target_dir: &Path, branch: Option<&str>) -> Result<()> {
+pub async fn clone(url: &str, target_dir: &Path, branch: Option<&str>, shallow: bool) -> Result<()> {
     check_git()?;
 
     // Ensure parent directory exists.
@@ -24,6 +39,10 @@ pub async fn clone(url: &str, target_dir: &Path, branch: Option<&str>) -> Result
 
     let mut cmd = Command::new("git");
     cmd.arg("clone");
+    if shallow {
+        cmd.arg("--depth").arg("1");
+        cmd.arg("--no-single-branch");
+    }
     if let Some(b) = branch {
         cmd.arg("--branch").arg(b);
     }
@@ -45,6 +64,10 @@ pub async fn clone(url: &str, target_dir: &Path, branch: Option<&str>) -> Result
 /// Strictly fast-forward only. Refuses to merge or rebase; if the local
 /// branch has diverged from its upstream, returns an error telling the
 /// user to resolve manually.
+///
+/// Shallow-clone note: on a `--depth 1` clone the `fetch` + ff-only will
+/// update the (still-shallow) tip of the current branch. History remains
+/// truncated to depth 1. No automatic deepening occurs here either.
 ///
 /// Implementation:
 /// 1. Determine the current branch (skip if `HEAD` is detached).
@@ -240,6 +263,55 @@ pub async fn current_branch(repo_path: &Path) -> Result<Option<String>> {
     }
 }
 
+/// Return the full commit SHA of the current HEAD (for provenance recording
+/// and prepared-context staleness checks).
+pub async fn current_commit_sha(repo_path: &Path) -> Result<String> {
+    check_git()?;
+
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .await
+        .context("failed to execute git rev-parse HEAD")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("git rev-parse HEAD failed: {}", stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Return how many commits exist between `base_sha` and `head_sha` (i.e. the
+/// number of commits `head_sha` is ahead of `base_sha`). Returns 0 when they
+/// are the same or when the range cannot be computed. Used for the "N commits
+/// behind" note when injecting a prepared map whose recorded commit differs
+/// from the current HEAD.
+pub async fn commit_count_between(repo_path: &Path, base_sha: &str, head_sha: &str) -> Result<usize> {
+    if base_sha == head_sha {
+        return Ok(0);
+    }
+    check_git()?;
+
+    let range = format!("{}..{}", base_sha, head_sha);
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-list")
+        .arg("--count")
+        .arg(&range)
+        .output()
+        .await
+        .context("failed to execute git rev-list --count")?;
+    if !out.status.success() {
+        // Degrade gracefully for unusual histories (reset, rebase, etc.)
+        return Ok(0);
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(s.parse::<usize>().unwrap_or(0))
+}
+
 /// Restore `repo_path` to the given `HeadState`.
 ///
 /// For a `Branch` this runs `git checkout <branch>`; for a `Detached` SHA it
@@ -281,6 +353,11 @@ pub async fn restore_head(repo_path: &Path, head: &HeadState) -> Result<()> {
 ///
 /// Fetches from `origin` first so that branches that exist only on the
 /// remote can be checked out as new local tracking branches.
+///
+/// Shallow-clone note: if the repo was cloned with `--depth 1 --no-single-branch`,
+/// this fetch will bring in a shallow (depth-1) copy of the target branch.
+/// No `--deepen` is performed automatically; users who need more history
+/// on a branch must run git commands manually inside the clone directory.
 pub async fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
     check_git()?;
 
@@ -380,6 +457,7 @@ mod tests {
             "https://github.com/nickel-org/rust-mustache.git",
             &target,
             None,
+            false,
         )
         .await;
 
@@ -402,6 +480,7 @@ mod tests {
             "https://github.com/nickel-org/rust-mustache.git",
             &target,
             None,
+            false,
         )
         .await
         .expect("clone should succeed");
@@ -423,7 +502,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
 
         let target = tmp.join("nonexistent");
-        let result = clone("https://example.com/nonexistent-repo.git", &target, None).await;
+        let result = clone("https://example.com/nonexistent-repo.git", &target, None, false).await;
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -760,5 +839,207 @@ mod tests {
         for url in invalid {
             assert!(validate_git_url(url).is_err(), "should reject: {url}");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Shallow clone tests (exercise --depth 1 --no-single-branch behavior)
+    // These use only local git repos (file://) so they run without network.
+    // ------------------------------------------------------------------
+
+    /// Helper: init a git repo at `dir` with `main` (2 commits) and `feature`
+    /// (1 commit), configure identity, return (main_tip, feature_tip).
+    async fn init_repo_with_main_and_feature(dir: &Path) -> (String, String) {
+        std::fs::create_dir_all(dir).unwrap();
+
+        async fn run(dir: &Path, args: &[&str]) -> std::process::Output {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .await
+                .unwrap()
+        }
+
+        run(dir, &["init", "--initial-branch", "main"]).await;
+        run(dir, &["config", "user.email", "test@example.invalid"]).await;
+        run(dir, &["config", "user.name", "Test User"]).await;
+        run(dir, &["commit", "--allow-empty", "-m", "main-1"]).await;
+        run(dir, &["commit", "--allow-empty", "-m", "main-2"]).await;
+        let main_tip = String::from_utf8(run(dir, &["rev-parse", "HEAD"]).await.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Create feature branch with its own tip (divergent from main).
+        run(dir, &["checkout", "-b", "feature"]).await;
+        run(dir, &["commit", "--allow-empty", "-m", "feature-1"]).await;
+        let feature_tip = String::from_utf8(run(dir, &["rev-parse", "HEAD"]).await.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Back to main for the default clone target.
+        run(dir, &["checkout", "main"]).await;
+
+        (main_tip, feature_tip)
+    }
+
+    #[tokio::test]
+    async fn shallow_clone_truncates_history_on_default_branch() {
+        let tmp = std::env::temp_dir().join("kcl-test-shallow-truncate");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let origin = tmp.join("origin");
+        let (main_tip, _feature_tip) = init_repo_with_main_and_feature(&origin).await;
+
+        let clone_dir = tmp.join("shallow-clone");
+        let url = format!("file://{}", origin.display());
+        clone(&url, &clone_dir, None, true).await.expect("shallow clone failed");
+
+        assert!(is_git_repo(&clone_dir));
+
+        // History must be truncated to depth 1.
+        let count_out = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&clone_dir)
+            .output()
+            .await
+            .unwrap();
+        let count = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
+        assert_eq!(count, "1", "shallow clone should have only the tip commit");
+
+        // The pre-tip commit from origin must NOT be present locally.
+        let old_commit = {
+            // main-1 is parent of main_tip
+            let parent_out = Command::new("git")
+                .args(["rev-parse", &format!("{}^", main_tip)])
+                .current_dir(&origin)
+                .output()
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&parent_out.stdout).trim().to_string()
+        };
+        let cat = Command::new("git")
+            .args(["cat-file", "-t", &old_commit])
+            .current_dir(&clone_dir)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            !cat.status.success(),
+            "old commit before shallow tip must be absent in depth-1 clone"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn shallow_clone_allows_checkout_of_other_branch() {
+        let tmp = std::env::temp_dir().join("kcl-test-shallow-branch-switch");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let origin = tmp.join("origin");
+        let (_main_tip, feature_tip) = init_repo_with_main_and_feature(&origin).await;
+
+        let clone_dir = tmp.join("shallow-clone");
+        let url = format!("file://{}", origin.display());
+        clone(&url, &clone_dir, None, true)
+            .await
+            .expect("shallow clone failed");
+
+        // Initially on main (depth 1).
+        let head0 = current_branch(&clone_dir).await.unwrap();
+        assert_eq!(head0, Some("main".to_string()));
+
+        // Checkout the other branch — must succeed thanks to --no-single-branch.
+        checkout(&clone_dir, "feature").await.expect("checkout feature on shallow clone failed");
+
+        let head1 = current_branch(&clone_dir).await.unwrap();
+        assert_eq!(head1, Some("feature".to_string()));
+
+        // Still only depth 1 on the feature branch.
+        let count_out = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&clone_dir)
+            .output()
+            .await
+            .unwrap();
+        let count = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
+        assert_eq!(count, "1");
+
+        // The feature_tip commit IS present (fetched shallowly).
+        let cat = Command::new("git")
+            .args(["cat-file", "-t", &feature_tip])
+            .current_dir(&clone_dir)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            cat.status.success(),
+            "the tip of the second branch must be fetchable after shallow clone with --no-single-branch"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn pull_on_shallow_clone_updates_tip_but_keeps_truncated() {
+        let tmp = std::env::temp_dir().join("kcl-test-shallow-pull");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let origin = tmp.join("origin");
+        let (_main_tip, _feature_tip) = init_repo_with_main_and_feature(&origin).await;
+
+        let clone_dir = tmp.join("shallow-clone");
+        let url = format!("file://{}", origin.display());
+        clone(&url, &clone_dir, None, true).await.expect("clone");
+
+        // Simulate an advance on the remote (new commit on main).
+        {
+            async fn run(dir: &Path, args: &[&str]) -> std::process::Output {
+                Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .output()
+                    .await
+                    .unwrap()
+            }
+            run(&origin, &["config", "user.email", "test@example.invalid"]).await;
+            run(&origin, &["config", "user.name", "Test User"]).await;
+            run(&origin, &["commit", "--allow-empty", "-m", "main-3"]).await;
+        }
+
+        // Pull should succeed even on shallow.
+        let msg = pull(&clone_dir).await.expect("pull on shallow should succeed");
+        // Accept any of the normal "already / updated / up to date" messages that pull() produces.
+        assert!(
+            msg.contains("Updating")
+                || msg.contains("up to date")
+                || msg.contains("Already up to date")
+                || msg.contains("Updated"),
+            "unexpected pull message on shallow clone: {msg}"
+        );
+
+        // Still only depth-1 after pull.
+        let count_out = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&clone_dir)
+            .output()
+            .await
+            .unwrap();
+        let count = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
+        let n: usize = count.parse().unwrap_or(99);
+        // A normal `pull` on a depth-1 clone will deepen by the number of new commits
+        // the remote advanced, but it does *not* unshallow the entire history.
+        // We only care that we did not get the full history (the test repo has > 2 commits).
+        assert!(
+            n <= 2,
+            "pull on shallow clone deepened too far (count={n}); we expect limited deepening only"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

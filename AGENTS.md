@@ -33,6 +33,8 @@ src/
     config_cmd.rs      — kcl config handler
     init.rs            — kcl init handler
     harnesses.rs       — kcl harnesses handler
+    prepare.rs         — kcl prepare handler (orientation map)
+    remember.rs        — kcl remember handler (semantic recall)
 ```
 
 ## Key Design Decisions
