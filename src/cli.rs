@@ -59,8 +59,12 @@ pub enum Command {
     /// maximally useful for future `kcl ask` sessions.
     ///
     /// The resulting map is stored and (by default) injected into every
-    /// subsequent `kcl ask` for this package, dramatically reducing the
-    /// agent's initial exploration phase on large or unfamiliar codebases.
+    /// subsequent `kcl ask` for this package. When the map is fresh, the ask
+    /// prompt instructs the agent to treat it as authoritative and skip a
+    /// broad tree scan, which can substantially reduce the initial
+    /// exploration phase on large or unfamiliar codebases. The benefit
+    /// varies by codebase and harness; small or already well-structured
+    /// repos may see little gain.
     ///
     /// Re-run this command after major refactors to refresh the map.
     Prepare {

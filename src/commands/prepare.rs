@@ -37,6 +37,96 @@ const PREPARE_PROMPT: &str = concat!(
     "Use the fewest tokens possible while staying unambiguous and maximally useful. Prefer short paths and bullets."
 );
 
+/// Hard upper bound (in bytes) on the orientation map persisted by `kcl prepare`.
+///
+/// The map is injected into every future `kcl ask`, so an unbounded/chatty
+/// harness output becomes permanent per-ask token overhead. Maps observed in
+/// practice are ~1.6k–2.9k chars; 3000 bytes keeps the useful signal while
+/// capping a runaway harness.
+const MAX_MAP_BYTES: usize = 3000;
+
+/// Conservatively normalize raw harness stdout into a storable orientation map.
+///
+/// Transformations (in order):
+/// 1. Trim leading/trailing whitespace.
+/// 2. If the *entire* output is wrapped in a single markdown code fence
+///    (```` ``` ```` or ```` ```lang ````), strip the surrounding fence lines
+///    and keep only the inner content. Only the whole-output case is handled;
+///    fences mid-content are left untouched.
+/// 3. Collapse runs of 3+ consecutive blank lines down to a single blank line.
+///
+/// Intentionally conservative: it removes obvious wrapper noise only and never
+/// attempts prose stripping or section validation, so real content is never
+/// dropped. Length capping is applied separately by the caller.
+fn sanitize_map(raw: &str) -> String {
+    let trimmed = raw.trim();
+
+    // Step 2: strip a single fence that wraps the entire output.
+    let unfenced = {
+        let mut lines: Vec<&str> = trimmed.lines().collect();
+        let is_fenced = lines.len() >= 2
+            && lines
+                .first()
+                .map(|l| l.trim_start().starts_with("```"))
+                .unwrap_or(false)
+            && lines
+                .last()
+                .map(|l| l.trim() == "```")
+                .unwrap_or(false);
+        if is_fenced {
+            lines.remove(0);
+            lines.pop();
+            lines.join("\n")
+        } else {
+            trimmed.to_string()
+        }
+    };
+
+    // Step 3: collapse 3+ consecutive blank lines into a single blank line.
+    let mut out: Vec<&str> = Vec::new();
+    let mut blank_run = 0usize;
+    for line in unfenced.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                out.push("");
+            }
+        } else {
+            blank_run = 0;
+            out.push(line);
+        }
+    }
+
+    out.join("\n").trim().to_string()
+}
+
+/// Truncate `map` so the *final* string (content + truncation marker) is at
+/// most `MAX_MAP_BYTES` bytes, cutting at a valid UTF-8 char boundary. Returns
+/// the input unchanged when it already fits.
+///
+/// Marker space is reserved *before* slicing: appending the marker after
+/// slicing to the full cap would push the stored/injected map past
+/// `MAX_MAP_BYTES`, defeating the per-ask overhead bound the cap exists to
+/// enforce.
+fn cap_map(map: String) -> String {
+    if map.len() <= MAX_MAP_BYTES {
+        return map;
+    }
+    let marker = format!(
+        "\n\n... [orientation map truncated by kcl at {} bytes]",
+        MAX_MAP_BYTES
+    );
+    // Reserve room for the marker so content + marker stays within the cap.
+    let budget = MAX_MAP_BYTES.saturating_sub(marker.len());
+    let mut end = budget.min(map.len());
+    while end > 0 && !map.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut capped = map[..end].trim_end().to_string();
+    capped.push_str(&marker);
+    capped
+}
+
 /// Arguments for a single `kcl prepare` invocation (mirrors AskArgs for consistency).
 pub struct PrepareArgs<'a> {
     pub identifier: &'a str,
@@ -261,6 +351,23 @@ async fn run_after_prepare_checkout(args: RunAfterPrepareCheckout<'_>) -> Result
     // Only persist a successful map. Failures still produce the right exit code
     // but leave any prior map untouched.
     if matches!(exit_code, Some(0)) {
+        // Normalize obvious wrapper noise, then enforce a hard length cap so a
+        // chatty harness can't impose unbounded per-ask overhead forever.
+        let sanitized = sanitize_map(&map_content);
+
+        // An empty/whitespace map is not a successful preparation: don't store
+        // it (which would mask a real failure as a usable map). Treat it like a
+        // harness failure so the process exits non-zero per the exit-code policy.
+        if sanitized.is_empty() {
+            eprintln!(
+                "error: harness produced an empty orientation map for `{}`; nothing stored",
+                pkg.identifier
+            );
+            return Ok(3);
+        }
+
+        let map_content = cap_map(sanitized);
+
         // Capture provenance exactly as it exists right after the harness run.
         let git_commit_sha = if pkg.source_type == SourceType::Git {
             crate::git::current_commit_sha(repo_path).await.ok()
@@ -324,6 +431,73 @@ mod tests {
     use std::env;
     use tempfile::tempdir;
 
+    #[test]
+    fn sanitize_trims_whitespace() {
+        assert_eq!(sanitize_map("  \n\nPurpose: x\n\n  "), "Purpose: x");
+    }
+
+    #[test]
+    fn sanitize_strips_whole_output_fence() {
+        let raw = "```\nPurpose: x\n- src/: core\n```";
+        assert_eq!(sanitize_map(raw), "Purpose: x\n- src/: core");
+    }
+
+    #[test]
+    fn sanitize_strips_whole_output_fence_with_lang() {
+        let raw = "```markdown\nPurpose: x\n```";
+        assert_eq!(sanitize_map(raw), "Purpose: x");
+    }
+
+    #[test]
+    fn sanitize_leaves_mid_content_fence_untouched() {
+        // A fence that does not wrap the whole output must be preserved.
+        let raw = "Purpose: x\n\n```rust\nfn main() {}\n```\n\nmore";
+        assert_eq!(sanitize_map(raw), raw);
+    }
+
+    #[test]
+    fn sanitize_collapses_blank_line_runs() {
+        let raw = "a\n\n\n\n\nb";
+        assert_eq!(sanitize_map(raw), "a\n\nb");
+    }
+
+    #[test]
+    fn sanitize_empty_input_is_empty() {
+        assert_eq!(sanitize_map(""), "");
+        assert_eq!(sanitize_map("   \n\t \n  "), "");
+        assert_eq!(sanitize_map("```\n\n```"), "");
+    }
+
+    #[test]
+    fn cap_map_leaves_short_input_unchanged() {
+        let s = "Purpose: x".to_string();
+        assert_eq!(cap_map(s.clone()), s);
+    }
+
+    #[test]
+    fn cap_map_truncates_at_char_boundary_with_marker() {
+        // Multibyte char ('é' = 2 bytes) repeated past the cap; ensure the
+        // result is valid UTF-8 (no split char) and carries the marker.
+        let big = "é".repeat(MAX_MAP_BYTES); // 2 * MAX_MAP_BYTES bytes
+        let capped = cap_map(big);
+        assert!(capped.is_char_boundary(capped.len()));
+        assert!(std::str::from_utf8(capped.as_bytes()).is_ok());
+        assert!(capped.contains(&format!(
+            "... [orientation map truncated by kcl at {} bytes]",
+            MAX_MAP_BYTES
+        )));
+        // The FINAL string (content + marker) must stay within the hard cap.
+        assert!(
+            capped.len() <= MAX_MAP_BYTES,
+            "capped len {} exceeds cap {}",
+            capped.len(),
+            MAX_MAP_BYTES
+        );
+        // And the content portion alone is necessarily within it too.
+        let content_len = capped.find("\n\n... [orientation map truncated").unwrap();
+        assert!(content_len <= MAX_MAP_BYTES);
+    }
+
     fn make_mock_harness() -> HarnessConfig {
         HarnessConfig {
             command: "sh".to_string(),
@@ -334,6 +508,7 @@ mod tests {
             prompt_mode: PromptMode::Arg,
             model_args: vec![],
             default_model: None,
+            prepared_args: vec![],
         }
     }
 

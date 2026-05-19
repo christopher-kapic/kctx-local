@@ -306,15 +306,24 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
     };
 
     // Pre-compute staleness distance while we are still async (git helper).
+    //
+    // Hot path: when the prepared map was recorded on the exact commit that is
+    // currently checked out, the map is definitionally fresh (0 commits
+    // behind). Compute that equality here and short-circuit so we do NOT spawn
+    // a `git rev-list` subprocess at all. (The git helper already returns 0
+    // for an equal range, but only after being awaited/spawned — this avoids
+    // the process entirely in the common prepared+unchanged case.) Behavior
+    // for the non-equal case is unchanged: we still ask git for the count.
+    let recorded_sha = prepared_context
+        .as_ref()
+        .and_then(|p| p.git_commit_sha.as_deref());
     let commits_behind: Option<usize> =
-        if let (Some(p), Some(cur)) = (&prepared_context, &current_head_sha) {
-            if let Some(rec) = &p.git_commit_sha {
-                git::commit_count_between(repo_path, rec, cur).await.ok()
-            } else {
-                None
+        match staleness_plan(recorded_sha, current_head_sha.as_deref()) {
+            StalenessPlan::None => None,
+            StalenessPlan::Fresh => Some(0),
+            StalenessPlan::AskGit { base, head } => {
+                git::commit_count_between(repo_path, base, head).await.ok()
             }
-        } else {
-            None
         };
 
     // If embeddings configured, embed the current question and find similar
@@ -371,13 +380,22 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
 
     let cwd = std::path::PathBuf::from(&pkg.path);
 
-    let harness_result = harness::run_harness(
+    // When a prepared orientation map was injected into the prompt, allow the
+    // harness config to append its `prepared_args` (e.g. `--max-turns`, a
+    // restricted `--allowedTools`) so exploration is mechanically capped even
+    // if the model ignores the prompt's "trust the map" guidance. With no map
+    // present this is `false` and the harness argv is unchanged (matching
+    // `kcl prepare`, which never gets `prepared_args`).
+    let map_present = prepared_context.is_some();
+
+    let harness_result = harness::run_harness_with_prepared_args(
         &harness_config,
         &prompt,
         &cwd,
         timeout,
         true, // stream stdout to caller
         effective_model.as_deref(),
+        map_present,
     )
     .await;
 
@@ -387,13 +405,36 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
     // persist a conversation record so every invocation appears in `kcl history`.
     // `exit_code = None` means the child had no exit status (killed by a signal)
     // or kcl could not obtain one (spawn failure, timeout, interrupted wait).
-    let (response_text, exit_code) = match harness_result {
+    let (mut response_text, mut exit_code) = match harness_result {
         Ok(output) => (output.stdout, output.exit_code),
         Err(e) => {
             eprintln!("error: {}", e);
             (format!("[error] {}", e), None)
         }
     };
+
+    // Guard: a harness that completed "successfully" (exit 0) but produced an
+    // empty or whitespace-only answer is NOT a usable result. Previously this
+    // was recorded as `exit_code=0, response=""` — a successful conversation
+    // that would then be embedded and surfaced as a reusable answer by
+    // `kcl remember`. Demote it to a failure: keep the conversation in the
+    // on-disk log and the history index (so the attempt is still visible) but
+    // record a non-zero exit code so it is never embedded, never treated as a
+    // reusable answer, and the command exits non-zero. An empty answer from a
+    // harness that *did* run to completion is closest to exit code 3.
+    let empty_success = is_empty_success(exit_code, &response_text);
+    if empty_success {
+        eprintln!(
+            "error: harness `{}` exited `0` but produced an empty response; treating as a failed answer (not recorded as reusable)",
+            harness_name
+        );
+        // Make the persisted log self-explanatory rather than a silent "".
+        response_text =
+            "[error] harness exited 0 but produced an empty response".to_string();
+        // Demote so every downstream consumer (log, history row, embedding
+        // gate, exit code) sees a completed-but-failed run.
+        exit_code = Some(3);
+    }
 
     // 6. Save conversation log as JSON file.
     let conv_id = uuid::Uuid::new_v4().to_string();
@@ -560,6 +601,54 @@ fn record_conversation_and_embedding(
             );
         }
     }
+}
+
+/// What `kcl ask` must do to learn how stale the prepared map is.
+///
+/// Splitting this decision out keeps the SHA-equal hot-path optimization
+/// unit-testable without spawning git.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StalenessPlan<'a> {
+    /// No prepared map, or no recorded/current SHA — staleness is unknown.
+    None,
+    /// Recorded SHA equals current HEAD: the map is definitionally fresh
+    /// (0 commits behind). No git subprocess is spawned.
+    Fresh,
+    /// SHAs differ: git must be asked for the commit count of `base..head`.
+    AskGit { base: &'a str, head: &'a str },
+}
+
+/// Decide how to compute "commits behind" for the prepared map.
+///
+/// Hot path: if the map's recorded commit equals the current HEAD we return
+/// [`StalenessPlan::Fresh`] so the caller can short-circuit to `Some(0)`
+/// *without* spawning `git rev-list`. Only when the SHAs genuinely differ do
+/// we ask git (preserving the previous behavior for that case exactly).
+pub(crate) fn staleness_plan<'a>(
+    recorded_sha: Option<&'a str>,
+    current_sha: Option<&'a str>,
+) -> StalenessPlan<'a> {
+    match (recorded_sha, current_sha) {
+        (Some(rec), Some(cur)) => {
+            if rec == cur {
+                StalenessPlan::Fresh
+            } else {
+                StalenessPlan::AskGit {
+                    base: rec,
+                    head: cur,
+                }
+            }
+        }
+        _ => StalenessPlan::None,
+    }
+}
+
+/// True when the harness ran to completion successfully (exit code `Some(0)`)
+/// yet produced an empty or whitespace-only answer. Such a result must NOT be
+/// recorded as a reusable success (it would otherwise be embedded and surfaced
+/// by `kcl remember`); the caller demotes it to a failed run.
+pub(crate) fn is_empty_success(exit_code: Option<i32>, response: &str) -> bool {
+    matches!(exit_code, Some(0)) && response.trim().is_empty()
 }
 
 /// Resolve the branch `kcl ask` (or `prepare`) should check out for this run.
@@ -876,5 +965,53 @@ mod tests {
 
         let questions = Conversation::recent_questions(&conn, &pkg.id, 5).unwrap();
         assert!(questions.is_empty());
+    }
+
+    #[test]
+    fn staleness_plan_sha_equal_is_fresh_and_skips_git() {
+        // Hot path: identical SHAs => Fresh, no AskGit (no subprocess).
+        assert_eq!(
+            staleness_plan(Some("abc123"), Some("abc123")),
+            StalenessPlan::Fresh
+        );
+    }
+
+    #[test]
+    fn staleness_plan_sha_differs_asks_git() {
+        assert_eq!(
+            staleness_plan(Some("aaaa"), Some("bbbb")),
+            StalenessPlan::AskGit {
+                base: "aaaa",
+                head: "bbbb"
+            }
+        );
+    }
+
+    #[test]
+    fn staleness_plan_none_when_sha_missing() {
+        assert_eq!(staleness_plan(None, Some("bbbb")), StalenessPlan::None);
+        assert_eq!(staleness_plan(Some("aaaa"), None), StalenessPlan::None);
+        assert_eq!(staleness_plan(None, None), StalenessPlan::None);
+    }
+
+    #[test]
+    fn empty_success_guard_flags_blank_zero_exit() {
+        // Exit 0 + empty/whitespace => must be treated as failure.
+        assert!(is_empty_success(Some(0), ""));
+        assert!(is_empty_success(Some(0), "   \n\t  "));
+    }
+
+    #[test]
+    fn empty_success_guard_allows_real_answer() {
+        assert!(!is_empty_success(Some(0), "Routing lives in src/router.rs"));
+    }
+
+    #[test]
+    fn empty_success_guard_ignores_non_zero_and_signal() {
+        // Non-zero / signal exits are handled by the existing exit-code
+        // mapping; the empty-success guard must not also fire for them.
+        assert!(!is_empty_success(Some(3), ""));
+        assert!(!is_empty_success(Some(1), "   "));
+        assert!(!is_empty_success(None, ""));
     }
 }

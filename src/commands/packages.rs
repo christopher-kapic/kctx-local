@@ -1282,6 +1282,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
 
@@ -1316,6 +1317,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
 
