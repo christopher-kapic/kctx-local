@@ -24,7 +24,7 @@
 //! [`embedding_to_blob`] / [`blob_to_embedding`] for (de)serialization.
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 
 use crate::paths;
@@ -64,7 +64,8 @@ impl EmbeddingConfig {
 
             let w: Wrapper = serde_json::from_str(&contents)
                 .with_context(|| format!("parsing {}", path.display()))?;
-            w.embeddings.ok_or_else(|| anyhow::anyhow!("no `embeddings` key present"))
+            w.embeddings
+                .ok_or_else(|| anyhow::anyhow!("no `embeddings` key present"))
         })()
         .ok()
     }
@@ -139,14 +140,20 @@ pub async fn embed_question(cfg: &EmbeddingConfig, text: &str) -> Result<Vec<f32
 
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_else(|_| "<no response body>".to_string());
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no response body>".to_string());
         let short: String = body.chars().take(400).collect();
 
         match status.as_u16() {
             401 | 403 => bail!(
                 "authentication failed (HTTP {}) calling `{}` embeddings API for model `{}`. \
                  Check that the `{}` environment variable is valid and has not been revoked.",
-                status, provider_label, cfg.model, key_var
+                status,
+                provider_label,
+                cfg.model,
+                key_var
             ),
             429 => bail!(
                 "rate limit (HTTP 429) from `{}` embeddings API. Wait a short while or switch \
@@ -156,11 +163,16 @@ pub async fn embed_question(cfg: &EmbeddingConfig, text: &str) -> Result<Vec<f32
             400 => bail!(
                 "bad request (HTTP 400) to `{}` embeddings endpoint for model `{}`: `{}`. \
                  Double-check the exact model identifier in your embeddings config.",
-                provider_label, cfg.model, short
+                provider_label,
+                cfg.model,
+                short
             ),
             _ => bail!(
                 "embeddings API call to `{}` (model `{}`) failed with status {}: `{}`",
-                provider_label, cfg.model, status, short
+                provider_label,
+                cfg.model,
+                status,
+                short
             ),
         }
     }
@@ -195,7 +207,8 @@ pub async fn embed_question(cfg: &EmbeddingConfig, text: &str) -> Result<Vec<f32
     if vector.is_empty() {
         bail!(
             "received empty embedding vector (len=0) from `{}` model `{}`",
-            provider_label, cfg.model
+            provider_label,
+            cfg.model
         );
     }
 
@@ -310,15 +323,9 @@ pub fn find_similar_questions(
     let query_blob = embedding_to_blob(query_embedding);
 
     // Fast path via sqlite-vec (if the auto-extension registered the functions)
-    if let Ok(results) = try_find_with_vec_distance(
-        conn,
-        package_id,
-        &query_blob,
-        model,
-        dim,
-        top_k,
-        threshold,
-    ) {
+    if let Ok(results) =
+        try_find_with_vec_distance(conn, package_id, &query_blob, model, dim, top_k, threshold)
+    {
         return results;
     }
 
@@ -369,7 +376,14 @@ fn try_find_with_vec_distance(
 
     let dim_i64 = dim as i64;
     let rows = stmt.query_map(
-        params![query_blob, package_id, model, dim_i64, query_blob, fetch_limit],
+        params![
+            query_blob,
+            package_id,
+            model,
+            dim_i64,
+            query_blob,
+            fetch_limit
+        ],
         |row| {
             let id: String = row.get(0)?;
             let question: String = row.get(1)?;
@@ -500,7 +514,11 @@ mod tests {
     fn cosine_similarities_batch_matches_single() {
         let q = vec![1.0, 0.0, 0.0];
         // Third candidate is at 45° in the x-y plane → cosine exactly 1/sqrt(2) ≈ 0.707
-        let cands = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.5, 0.5, 0.0]];
+        let cands = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.5, 0.5, 0.0],
+        ];
         let batch = cosine_similarities(&q, &cands);
         assert_eq!(batch.len(), 3);
         assert!((batch[0] - 1.0).abs() < 1e-6);
@@ -539,7 +557,9 @@ mod tests {
             model: "text-embedding-3-small".to_string(),
         };
 
-        let err = embed_question(&cfg, "does rust have async?").await.unwrap_err();
+        let err = embed_question(&cfg, "does rust have async?")
+            .await
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("`OPENAI_API_KEY`"));
         assert!(msg.contains("`openai`"));
@@ -558,8 +578,14 @@ mod tests {
 
     #[test]
     fn provider_from_str_roundtrips_and_errors_with_backticks() {
-        assert_eq!("openai".parse::<EmbeddingProvider>().unwrap(), EmbeddingProvider::Openai);
-        assert_eq!("openrouter".parse::<EmbeddingProvider>().unwrap(), EmbeddingProvider::Openrouter);
+        assert_eq!(
+            "openai".parse::<EmbeddingProvider>().unwrap(),
+            EmbeddingProvider::Openai
+        );
+        assert_eq!(
+            "openrouter".parse::<EmbeddingProvider>().unwrap(),
+            EmbeddingProvider::Openrouter
+        );
 
         let err = "foo".parse::<EmbeddingProvider>().unwrap_err();
         let msg = err.to_string();
@@ -595,11 +621,8 @@ mod tests {
         .unwrap();
 
         // Seed one conversation + embedding (dim = 2)
-        conn.execute(
-            "INSERT INTO packages (id) VALUES ('pkg1')",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO packages (id) VALUES ('pkg1')", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO conversations (id, package_id, question) VALUES ('conv-1', 'pkg1', 'How do I build?')",
             [],
@@ -615,15 +638,8 @@ mod tests {
         .unwrap();
 
         let query = vec![0.99_f32, 0.01]; // very close
-        let results = find_similar_questions(
-            &conn,
-            "pkg1",
-            &query,
-            "text-embedding-3-small",
-            2,
-            5,
-            0.5,
-        );
+        let results =
+            find_similar_questions(&conn, "pkg1", &query, "text-embedding-3-small", 2, 5, 0.5);
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "conv-1");

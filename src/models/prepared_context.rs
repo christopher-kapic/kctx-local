@@ -91,10 +91,7 @@ impl PreparedContext {
     }
 
     /// Fetch the latest global (branch IS NULL) prepared context for the package.
-    pub fn get_latest_for_package(
-        conn: &Connection,
-        package_id: &str,
-    ) -> Result<Option<Self>> {
+    pub fn get_latest_for_package(conn: &Connection, package_id: &str) -> Result<Option<Self>> {
         let mut stmt = conn.prepare(
             "SELECT id, package_id, content, created_at, harness, model, git_commit_sha, git_branch, prepare_scope_at_time
              FROM package_prepared_contexts
@@ -267,7 +264,9 @@ mod tests {
         );
         second.insert(&conn).unwrap();
 
-        let latest = PreparedContext::get_latest_for_package(&conn, &pkg.id).unwrap().unwrap();
+        let latest = PreparedContext::get_latest_for_package(&conn, &pkg.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(latest.content, "second");
     }
 }

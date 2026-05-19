@@ -51,7 +51,13 @@ pub fn build_prompt(
         let rec = p.git_commit_sha.as_deref().unwrap_or("unknown");
         let cur = current_commit_sha.unwrap_or("unknown");
         let behind = commits_behind
-            .map(|n| if n == 0 { String::new() } else { format!(", {} commits behind", n) })
+            .map(|n| {
+                if n == 0 {
+                    String::new()
+                } else {
+                    format!(", {} commits behind", n)
+                }
+            })
             .unwrap_or_default();
         let scope = &p.prepare_scope_at_time;
 
@@ -377,7 +383,16 @@ mod tests {
 
     #[test]
     fn prompt_builder_basic() {
-        let prompt = build_prompt("Axum", "axum", "How does routing work?", None, None, None, None, &[]);
+        let prompt = build_prompt(
+            "Axum",
+            "axum",
+            "How does routing work?",
+            None,
+            None,
+            None,
+            None,
+            &[],
+        );
 
         assert!(prompt.contains("Axum (axum)"));
         assert!(prompt.contains("Question: How does routing work?"));
@@ -396,7 +411,16 @@ mod tests {
             "How do middleware work?".to_string(),
             "What extractors are available?".to_string(),
         ];
-        let prompt = build_prompt("Axum", "axum", "How does routing work?", Some(&recent), None, None, None, &[]);
+        let prompt = build_prompt(
+            "Axum",
+            "axum",
+            "How does routing work?",
+            Some(&recent),
+            None,
+            None,
+            None,
+            &[],
+        );
 
         assert!(prompt.contains("Axum (axum)"));
         assert!(prompt.contains("Question: How does routing work?"));
@@ -408,7 +432,16 @@ mod tests {
     #[test]
     fn prompt_builder_with_empty_context() {
         let recent: Vec<String> = vec![];
-        let prompt = build_prompt("Axum", "axum", "How does routing work?", Some(&recent), None, None, None, &[]);
+        let prompt = build_prompt(
+            "Axum",
+            "axum",
+            "How does routing work?",
+            Some(&recent),
+            None,
+            None,
+            None,
+            &[],
+        );
 
         // Empty context list should not produce the context block
         assert!(!prompt.contains("Recent questions"));
@@ -665,7 +698,11 @@ mod tests {
 
         assert!(prompt.contains("--- BEGIN PREPARED ORIENTATION MAP ---"));
         assert!(prompt.contains("Prepared at "));
-        assert!(prompt.contains("on commit `abc123def456` (current HEAD `abc123def456`). Scope: `global`"));
+        assert!(
+            prompt.contains(
+                "on commit `abc123def456` (current HEAD `abc123def456`). Scope: `global`"
+            )
+        );
         assert!(prompt.contains("Key files: src/lib.rs"));
         assert!(prompt.contains("--- END PREPARED ORIENTATION MAP ---"));
     }

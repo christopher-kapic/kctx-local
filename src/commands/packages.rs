@@ -484,11 +484,15 @@ fn cmd_show(identifier: &str, json: bool) -> Result<()> {
         }
         println!("shallow:       {}", pkg.shallow);
         if pkg.shallow {
-            println!("               (note: history truncated; older commits/versions unavailable until `git fetch --deepen=N` inside the clone dir)");
+            println!(
+                "               (note: history truncated; older commits/versions unavailable until `git fetch --deepen=N` inside the clone dir)"
+            );
         }
         println!("prepare_scope: {}", pkg.prepare_scope);
         if pkg.prepare_scope == "branch" {
-            println!("               (per-branch prepared contexts; run `kcl prepare --branch <name>` to (re)generate for a specific branch)");
+            println!(
+                "               (per-branch prepared contexts; run `kcl prepare --branch <name>` to (re)generate for a specific branch)"
+            );
         }
         println!("created_at:    {}", pkg.created_at);
         println!("updated_at:    {}", pkg.updated_at);
@@ -589,12 +593,16 @@ fn cmd_set(identifier: &str, key: &str, value: Option<&str>, unset: bool) -> Res
             match val {
                 "global" | "branch" => pkg.prepare_scope = val.to_string(),
                 other => {
-                    bail!("invalid value for prepare-scope: `{other}` (expected `global` or `branch`)")
+                    bail!(
+                        "invalid value for prepare-scope: `{other}` (expected `global` or `branch`)"
+                    )
                 }
             }
         }
         other => {
-            bail!("Unknown property `{other}`. Valid properties: auto-pull, harness, prepare-scope.");
+            bail!(
+                "Unknown property `{other}`. Valid properties: auto-pull, harness, prepare-scope."
+            );
         }
     }
 

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::db;
-use crate::embeddings::{embed_question, find_similar_questions, EmbeddingConfig, SimilarMemory};
+use crate::embeddings::{EmbeddingConfig, SimilarMemory, embed_question, find_similar_questions};
 use crate::git;
 use crate::git::HeadState;
 use crate::harness;
@@ -306,15 +306,16 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
     };
 
     // Pre-compute staleness distance while we are still async (git helper).
-    let commits_behind: Option<usize> = if let (Some(p), Some(cur)) = (&prepared_context, &current_head_sha) {
-        if let Some(rec) = &p.git_commit_sha {
-            git::commit_count_between(repo_path, rec, cur).await.ok()
+    let commits_behind: Option<usize> =
+        if let (Some(p), Some(cur)) = (&prepared_context, &current_head_sha) {
+            if let Some(rec) = &p.git_commit_sha {
+                git::commit_count_between(repo_path, rec, cur).await.ok()
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
     // If embeddings configured, embed the current question and find similar
     // prior conversations (same model+dim). Top 3 above 0.80 cosine.
@@ -325,7 +326,10 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
                 find_similar_questions(&conn, &pkg.id, &emb, &emb_cfg.model, dim, 3, 0.80)
             }
             Err(e) => {
-                eprintln!("warning: failed to embed question for similarity search: {:#}", e);
+                eprintln!(
+                    "warning: failed to embed question for similarity search: {:#}",
+                    e
+                );
                 Vec::new()
             }
         }
@@ -525,8 +529,7 @@ fn record_conversation_and_embedding(
                     eprintln!("warning: failed to record conversation in history: {:#}", e);
                 } else {
                     if let Some((model, dim, blob, created_at)) = embedding_row {
-                        const INSERT_EMBEDDING_SQL: &str =
-                            "INSERT OR REPLACE INTO conversation_embeddings (conversation_id, model, dim, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)";
+                        const INSERT_EMBEDDING_SQL: &str = "INSERT OR REPLACE INTO conversation_embeddings (conversation_id, model, dim, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)";
                         if let Err(e) = tx.execute(
                             INSERT_EMBEDDING_SQL,
                             rusqlite::params![conv_id, &model, dim as i64, blob, created_at],

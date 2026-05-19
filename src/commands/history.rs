@@ -189,8 +189,8 @@ mod tests {
                 "claude".to_string(),
                 Some(0),
                 format!("/tmp/logs/conv{}.json", i),
-            None,
-            None,
+                None,
+                None,
             );
             conv.insert(&conn).unwrap();
         }
@@ -213,8 +213,8 @@ mod tests {
                 "claude".to_string(),
                 Some(0),
                 format!("/tmp/logs/conv{}.json", i),
-            None,
-            None,
+                None,
+                None,
             );
             conv.insert(&conn).unwrap();
         }

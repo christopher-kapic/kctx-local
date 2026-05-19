@@ -28,7 +28,12 @@ fn check_git() -> Result<()> {
 /// This is the accepted disk-space vs. history tradeoff for `--shallow`.
 ///
 /// Creates parent directories as needed.
-pub async fn clone(url: &str, target_dir: &Path, branch: Option<&str>, shallow: bool) -> Result<()> {
+pub async fn clone(
+    url: &str,
+    target_dir: &Path,
+    branch: Option<&str>,
+    shallow: bool,
+) -> Result<()> {
     check_git()?;
 
     // Ensure parent directory exists.
@@ -288,7 +293,11 @@ pub async fn current_commit_sha(repo_path: &Path) -> Result<String> {
 /// are the same or when the range cannot be computed. Used for the "N commits
 /// behind" note when injecting a prepared map whose recorded commit differs
 /// from the current HEAD.
-pub async fn commit_count_between(repo_path: &Path, base_sha: &str, head_sha: &str) -> Result<usize> {
+pub async fn commit_count_between(
+    repo_path: &Path,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<usize> {
     if base_sha == head_sha {
         return Ok(0);
     }
@@ -502,7 +511,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
 
         let target = tmp.join("nonexistent");
-        let result = clone("https://example.com/nonexistent-repo.git", &target, None, false).await;
+        let result = clone(
+            "https://example.com/nonexistent-repo.git",
+            &target,
+            None,
+            false,
+        )
+        .await;
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -895,7 +910,9 @@ mod tests {
 
         let clone_dir = tmp.join("shallow-clone");
         let url = format!("file://{}", origin.display());
-        clone(&url, &clone_dir, None, true).await.expect("shallow clone failed");
+        clone(&url, &clone_dir, None, true)
+            .await
+            .expect("shallow clone failed");
 
         assert!(is_git_repo(&clone_dir));
 
@@ -906,7 +923,9 @@ mod tests {
             .output()
             .await
             .unwrap();
-        let count = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
+        let count = String::from_utf8_lossy(&count_out.stdout)
+            .trim()
+            .to_string();
         assert_eq!(count, "1", "shallow clone should have only the tip commit");
 
         // The pre-tip commit from origin must NOT be present locally.
@@ -918,7 +937,9 @@ mod tests {
                 .output()
                 .await
                 .unwrap();
-            String::from_utf8_lossy(&parent_out.stdout).trim().to_string()
+            String::from_utf8_lossy(&parent_out.stdout)
+                .trim()
+                .to_string()
         };
         let cat = Command::new("git")
             .args(["cat-file", "-t", &old_commit])
@@ -954,7 +975,9 @@ mod tests {
         assert_eq!(head0, Some("main".to_string()));
 
         // Checkout the other branch — must succeed thanks to --no-single-branch.
-        checkout(&clone_dir, "feature").await.expect("checkout feature on shallow clone failed");
+        checkout(&clone_dir, "feature")
+            .await
+            .expect("checkout feature on shallow clone failed");
 
         let head1 = current_branch(&clone_dir).await.unwrap();
         assert_eq!(head1, Some("feature".to_string()));
@@ -966,7 +989,9 @@ mod tests {
             .output()
             .await
             .unwrap();
-        let count = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
+        let count = String::from_utf8_lossy(&count_out.stdout)
+            .trim()
+            .to_string();
         assert_eq!(count, "1");
 
         // The feature_tip commit IS present (fetched shallowly).
@@ -1013,7 +1038,9 @@ mod tests {
         }
 
         // Pull should succeed even on shallow.
-        let msg = pull(&clone_dir).await.expect("pull on shallow should succeed");
+        let msg = pull(&clone_dir)
+            .await
+            .expect("pull on shallow should succeed");
         // Accept any of the normal "already / updated / up to date" messages that pull() produces.
         assert!(
             msg.contains("Updating")
@@ -1030,7 +1057,9 @@ mod tests {
             .output()
             .await
             .unwrap();
-        let count = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
+        let count = String::from_utf8_lossy(&count_out.stdout)
+            .trim()
+            .to_string();
         let n: usize = count.parse().unwrap_or(99);
         // A normal `pull` on a depth-1 clone will deepen by the number of new commits
         // the remote advanced, but it does *not* unshallow the entire history.

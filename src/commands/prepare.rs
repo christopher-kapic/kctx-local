@@ -273,10 +273,7 @@ async fn run_after_prepare_checkout(args: RunAfterPrepareCheckout<'_>) -> Result
             None
         };
         let prepare_scope_at_time = pkg.prepare_scope.clone();
-        let branch_for_log = git_branch
-            .as_deref()
-            .unwrap_or("global")
-            .to_string();
+        let branch_for_log = git_branch.as_deref().unwrap_or("global").to_string();
 
         let prepared = PreparedContext::new(
             pkg.id.clone(),
@@ -297,14 +294,15 @@ async fn run_after_prepare_checkout(args: RunAfterPrepareCheckout<'_>) -> Result
                 } else {
                     eprintln!(
                         "stored prepared context for `{}` (scope: {}, branch: {})",
-                        pkg.identifier,
-                        prepare_scope_at_time,
-                        branch_for_log
+                        pkg.identifier, prepare_scope_at_time, branch_for_log
                     );
                 }
             }
             Err(e) => {
-                eprintln!("warning: failed to reopen database for prepared context: {:#}", e);
+                eprintln!(
+                    "warning: failed to reopen database for prepared context: {:#}",
+                    e
+                );
             }
         }
     }
@@ -367,7 +365,8 @@ mod tests {
         let cfg_path = crate::paths::config_file().unwrap();
         let mut cfg = Config::default();
         cfg.default_harness = "mock".to_string();
-        cfg.harnesses.insert("mock".to_string(), make_mock_harness());
+        cfg.harnesses
+            .insert("mock".to_string(), make_mock_harness());
         cfg.save(&cfg_path).expect("save test config");
 
         // Create the package directory (and optionally turn it into a git repo with a commit).
@@ -404,7 +403,11 @@ mod tests {
             "prep-test".to_string(),
             "prep-test".to_string(),
             source_type,
-            if make_git { Some("https://example.com/fake.git".to_string()) } else { None },
+            if make_git {
+                Some("https://example.com/fake.git".to_string())
+            } else {
+                None
+            },
             None,
             pkg_dir.to_string_lossy().to_string(),
             false,

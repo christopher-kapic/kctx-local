@@ -184,7 +184,8 @@ impl Conversation {
             1 => Ok(Some(matches.into_iter().next().unwrap())),
             n => anyhow::bail!(
                 "Conversation id prefix `{}` is ambiguous (matches {} conversations). Supply a longer prefix or the full ID.",
-                id_or_prefix, n
+                id_or_prefix,
+                n
             ),
         }
     }
@@ -371,16 +372,24 @@ mod tests {
         conv2.insert(&conn).unwrap();
 
         // Exact full id works.
-        let by_full = Conversation::get_by_id_or_prefix(&conn, &conv1.id).unwrap().unwrap();
+        let by_full = Conversation::get_by_id_or_prefix(&conn, &conv1.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(by_full.id, conv1.id);
 
         // Unique short prefix works (first 8 chars of a v4 uuid are almost always unique in tiny test set).
         let short = &conv2.id[..8];
-        let by_short = Conversation::get_by_id_or_prefix(&conn, short).unwrap().unwrap();
+        let by_short = Conversation::get_by_id_or_prefix(&conn, short)
+            .unwrap()
+            .unwrap();
         assert_eq!(by_short.id, conv2.id);
 
         // Non-existent prefix -> None.
-        assert!(Conversation::get_by_id_or_prefix(&conn, "deadbeef").unwrap().is_none());
+        assert!(
+            Conversation::get_by_id_or_prefix(&conn, "deadbeef")
+                .unwrap()
+                .is_none()
+        );
 
         // If we had ambiguity we would error, but with only two rows a colliding 1-char prefix is unlikely;
         // we just assert the happy paths here.

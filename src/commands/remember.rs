@@ -69,7 +69,10 @@ pub fn run(cmd: &Command) -> Result<()> {
     });
 
     println!("ID:                {}", log.id);
-    println!("Package:           {} ({})", log.package_identifier, log.package_id);
+    println!(
+        "Package:           {} ({})",
+        log.package_identifier, log.package_id
+    );
     println!("Question:          {}", log.question);
     println!("---");
     println!("{}", log.response);

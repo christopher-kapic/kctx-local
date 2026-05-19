@@ -1,8 +1,8 @@
 mod cli;
 mod commands;
 mod config;
-mod embeddings;
 mod db;
+mod embeddings;
 mod git;
 mod harness;
 mod models;

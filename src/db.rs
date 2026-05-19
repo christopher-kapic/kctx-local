@@ -57,13 +57,10 @@ fn apply_pragmas(conn: &Connection) -> Result<()> {
 /// produces a clear error mentioning `sqlite-vec`.
 fn register_sqlite_vec_extension() -> Result<()> {
     let mut reg_err = None;
-    VEC_REGISTERED.call_once(|| {
-        unsafe {
-            let raw: RawAutoExtension =
-                std::mem::transmute(sqlite3_vec_init as *const () as usize);
-            if let Err(e) = register_auto_extension(raw) {
-                reg_err = Some(e);
-            }
+    VEC_REGISTERED.call_once(|| unsafe {
+        let raw: RawAutoExtension = std::mem::transmute(sqlite3_vec_init as *const () as usize);
+        if let Err(e) = register_auto_extension(raw) {
+            reg_err = Some(e);
         }
     });
     if let Some(e) = reg_err {
@@ -338,7 +335,10 @@ mod tests {
         let v: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 4, "expected user_version=4 after memory+prepare+shallow+provenance migrations");
+        assert_eq!(
+            v, 4,
+            "expected user_version=4 after memory+prepare+shallow+provenance migrations"
+        );
     }
 
     #[test]
@@ -388,7 +388,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(has_git_cols, 2, "git_commit_sha + git_branch columns must exist on conversations");
+        assert_eq!(
+            has_git_cols, 2,
+            "git_commit_sha + git_branch columns must exist on conversations"
+        );
     }
 
     #[test]
