@@ -59,6 +59,7 @@ impl MapFreshness {
 /// The two new blocks (prepared map + similar memories) are injected near the
 /// top so the agent sees high-signal orientation and provenance hints first.
 /// Delimiters are chosen to be obvious to both humans and LLM agents.
+#[allow(clippy::too_many_arguments)]
 pub fn build_prompt(
     display_name: &str,
     identifier: &str,

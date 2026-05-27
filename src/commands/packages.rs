@@ -745,11 +745,11 @@ async fn cmd_import(file: Option<&str>) -> Result<()> {
                 // Always apply prepare_scope from manifest (defaults to global for old manifests).
                 {
                     let conn = open_db()?;
-                    if let Some(mut pkg) = Package::get_by_identifier(&conn, &entry.identifier)? {
-                        if pkg.prepare_scope != entry.prepare_scope {
-                            pkg.prepare_scope = entry.prepare_scope.clone();
-                            pkg.update(&conn)?;
-                        }
+                    if let Some(mut pkg) = Package::get_by_identifier(&conn, &entry.identifier)?
+                        && pkg.prepare_scope != entry.prepare_scope
+                    {
+                        pkg.prepare_scope = entry.prepare_scope.clone();
+                        pkg.update(&conn)?;
                     }
                 }
                 added += 1;
