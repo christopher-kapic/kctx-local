@@ -25,7 +25,7 @@ pub struct Config {
 }
 
 /// A harness definition — an external coding agent invoked as a subprocess.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct HarnessConfig {
     /// Executable name or path.
     pub command: String,
@@ -57,11 +57,24 @@ pub struct HarnessConfig {
     /// empty (the harness has no way to receive a model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+
+    /// Optional extra args appended to the harness invocation **only** when a
+    /// prepared orientation map is injected into a `kcl ask` (never for
+    /// `kcl prepare` itself, and never for a plain map-less `ask`). These let
+    /// the harness config impose a mechanical exploration ceiling (e.g.
+    /// `["--max-turns", "8"]` or a restricted `["--allowedTools", "Read,Grep"]`)
+    /// that caps cost even if the model ignores the prompt's "trust the map"
+    /// guidance. The same placeholder substitution applied to `args` /
+    /// `model_args` (`{prompt}` in `arg` prompt mode, `{model}` when a model is
+    /// resolved) is applied here so combined-form args keep working.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepared_args: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptMode {
+    #[default]
     Arg,
     Stdin,
 }
@@ -159,6 +172,8 @@ impl Config {
     /// Save config to the given path, creating parent directories as needed.
     /// Uses atomic temp-file + rename to prevent corruption on crash.
     pub fn save(&self, path: &Path) -> Result<()> {
+        validate_timeout(self.default_timeout)?;
+
         let parent = path
             .parent()
             .context("config path has no parent directory")?;
@@ -286,6 +301,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
 
@@ -360,6 +376,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
         validate_harness_configured(&config, "my-custom").unwrap();
@@ -376,6 +393,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
         let err = validate_harness_configured(&config, "nonexistent").unwrap_err();
@@ -450,6 +468,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
 
@@ -459,5 +478,92 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deserialize_harness_without_prepared_args_defaults_empty() {
+        // Existing configs that predate `prepared_args` must still load and
+        // get an empty vec (no behavior change for them).
+        let json = r#"{
+            "clone_dir": "/tmp/p",
+            "default_harness": "claude",
+            "harnesses": {
+                "claude": {
+                    "command": "claude",
+                    "args": ["-p", "{prompt}"],
+                    "prompt_mode": "arg"
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let claude = &config.harnesses["claude"];
+        assert!(
+            claude.prepared_args.is_empty(),
+            "missing prepared_args must default to empty"
+        );
+    }
+
+    #[test]
+    fn deserialize_harness_with_prepared_args() {
+        let json = r#"{
+            "clone_dir": "/tmp/p",
+            "default_harness": "claude",
+            "harnesses": {
+                "claude": {
+                    "command": "claude",
+                    "args": ["-p", "{prompt}"],
+                    "prompt_mode": "arg",
+                    "prepared_args": ["--max-turns", "8", "--allowedTools", "Read,Grep"]
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let claude = &config.harnesses["claude"];
+        assert_eq!(
+            claude.prepared_args,
+            vec!["--max-turns", "8", "--allowedTools", "Read,Grep"]
+        );
+    }
+
+    #[test]
+    fn roundtrip_with_prepared_args() {
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec!["-p".to_string(), "{prompt}".to_string()],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+                prepared_args: vec!["--max-turns".to_string(), "8".to_string()],
+            },
+        );
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, back);
+    }
+
+    #[test]
+    fn prepared_args_omitted_from_json_when_empty() {
+        // `skip_serializing_if = "Vec::is_empty"` keeps existing config files
+        // byte-stable: an empty `prepared_args` is not written out.
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".to_string(),
+            HarnessConfig {
+                command: "claude".to_string(),
+                args: vec!["-p".to_string()],
+                prompt_mode: PromptMode::Arg,
+                model_args: vec![],
+                default_model: None,
+                prepared_args: vec![],
+            },
+        );
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("prepared_args"),
+            "empty prepared_args must be skipped in serialized output"
+        );
     }
 }

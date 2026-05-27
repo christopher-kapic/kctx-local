@@ -5,6 +5,20 @@ use rusqlite::Connection;
 
 /// Open (or create) the SQLite database at the given path and run migrations.
 pub fn open(path: &Path) -> Result<Connection> {
+    open_inner(path, true)
+}
+
+/// Open the SQLite database at `path` without running schema migrations.
+///
+/// Use this only on hot paths that have already opened the DB (and therefore
+/// already migrated) earlier in the same `kcl` invocation, but need to drop
+/// and reopen the connection to release WAL locks across a long-running
+/// subprocess (the harness). Caller guarantees the schema is already current.
+pub fn open_no_migrate(path: &Path) -> Result<Connection> {
+    open_inner(path, false)
+}
+
+fn open_inner(path: &Path, run_migrations: bool) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("could not create data directory: {}", parent.display()))?;
@@ -14,7 +28,9 @@ pub fn open(path: &Path) -> Result<Connection> {
         .with_context(|| format!("could not open database: {}", path.display()))?;
 
     apply_pragmas(&conn)?;
-    migrate(&conn)?;
+    if run_migrations {
+        migrate(&conn)?;
+    }
 
     Ok(conn)
 }
@@ -58,6 +74,8 @@ fn migrate(conn: &Connection) -> Result<()> {
                 path            TEXT NOT NULL,
                 auto_pull       INTEGER NOT NULL DEFAULT 0,
                 harness         TEXT,
+                shallow         INTEGER NOT NULL DEFAULT 0,
+                prepare_scope   TEXT NOT NULL DEFAULT 'global',
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
             );
@@ -69,6 +87,8 @@ fn migrate(conn: &Connection) -> Result<()> {
                 harness         TEXT NOT NULL,
                 exit_code       INTEGER,
                 log_path        TEXT NOT NULL,
+                git_commit_sha  TEXT,
+                git_branch      TEXT,
                 created_at      TEXT NOT NULL
             );
 
@@ -76,6 +96,30 @@ fn migrate(conn: &Connection) -> Result<()> {
                 ON conversations(package_id);
             CREATE INDEX IF NOT EXISTS idx_conversations_created_at
                 ON conversations(created_at);
+
+            -- New tables are also created for fresh DBs (the <4 block will
+            -- also run for version=0 snapshots and CREATE IF NOT EXISTS).
+            CREATE TABLE IF NOT EXISTS package_prepared_contexts (
+                id TEXT PRIMARY KEY,
+                package_id TEXT NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                model TEXT,
+                git_commit_sha TEXT,
+                git_branch TEXT,
+                prepare_scope_at_time TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_prepared_contexts_package
+                ON package_prepared_contexts(package_id);
+            CREATE INDEX IF NOT EXISTS idx_prepared_contexts_pkg_created
+                ON package_prepared_contexts(package_id, created_at DESC);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_prepared_pkg_global
+                ON package_prepared_contexts(package_id) WHERE git_branch IS NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_prepared_pkg_branch
+                ON package_prepared_contexts(package_id, git_branch) WHERE git_branch IS NOT NULL;
 
             PRAGMA user_version = 1;
             ",
@@ -91,6 +135,79 @@ fn migrate(conn: &Connection) -> Result<()> {
             DROP INDEX IF EXISTS idx_conversations_package_id;
 
             PRAGMA user_version = 2;
+            ",
+        )?;
+    }
+
+    if version < 3 {
+        // Add the `shallow` column for optional shallow clones.
+        // Use a best-effort ALTER: ignore "duplicate column" so that a fresh
+        // DB whose v1 CREATE TABLE already contains the column (new installs)
+        // does not fail the migration. Old v2 DBs will get the column added.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE packages ADD COLUMN shallow INTEGER NOT NULL DEFAULT 0",
+            [],
+        ) {
+            let msg = e.to_string().to_lowercase();
+            if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                return Err(e.into());
+            }
+        }
+        conn.execute("PRAGMA user_version = 3", [])?;
+    }
+
+    if version < 4 {
+        // Add `prepare_scope` (for global vs per-branch prepared context) and
+        // provenance columns (commit + branch) recorded on conversations.
+        // Safe ALTERs + CREATE IF NOT for the prepared-contexts table.
+        // Idempotent for DBs that already have the columns (e.g. from v1 CREATE).
+        if let Err(e) = conn.execute(
+            "ALTER TABLE packages ADD COLUMN prepare_scope TEXT NOT NULL DEFAULT 'global'",
+            [],
+        ) {
+            let msg = e.to_string().to_lowercase();
+            if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                return Err(e.into());
+            }
+        }
+
+        for col_sql in [
+            "ALTER TABLE conversations ADD COLUMN git_commit_sha TEXT",
+            "ALTER TABLE conversations ADD COLUMN git_branch TEXT",
+        ] {
+            if let Err(e) = conn.execute(col_sql, []) {
+                let msg = e.to_string().to_lowercase();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    return Err(e.into());
+                }
+            }
+        }
+
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS package_prepared_contexts (
+                id TEXT PRIMARY KEY,
+                package_id TEXT NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                model TEXT,
+                git_commit_sha TEXT,
+                git_branch TEXT,
+                prepare_scope_at_time TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_prepared_contexts_package
+                ON package_prepared_contexts(package_id);
+            CREATE INDEX IF NOT EXISTS idx_prepared_contexts_pkg_created
+                ON package_prepared_contexts(package_id, created_at DESC);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_prepared_pkg_global
+                ON package_prepared_contexts(package_id) WHERE git_branch IS NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_prepared_pkg_branch
+                ON package_prepared_contexts(package_id, git_branch) WHERE git_branch IS NOT NULL;
+
+            PRAGMA user_version = 4;
             ",
         )?;
     }
@@ -172,5 +289,148 @@ mod tests {
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .unwrap();
         assert_eq!(fk, 1);
+    }
+
+    #[test]
+    fn user_version_is_4_after_migrations() {
+        let conn = open_memory().unwrap();
+        let v: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            v, 4,
+            "expected user_version=4 after memory+prepare+shallow+provenance migrations"
+        );
+    }
+
+    #[test]
+    fn new_tables_and_columns_exist_after_migrations() {
+        let conn = open_memory().unwrap();
+
+        let table = "package_prepared_contexts";
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "table `{}` must exist after v4 migration", table);
+
+        // prepare_scope on packages
+        let has_ps: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('packages') WHERE name = 'prepare_scope'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_ps, 1, "`prepare_scope` column must exist on packages");
+
+        // provenance columns on conversations
+        let has_git_cols: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name IN ('git_commit_sha', 'git_branch')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            has_git_cols, 2,
+            "git_commit_sha + git_branch columns must exist on conversations"
+        );
+    }
+
+    #[test]
+    fn package_prepare_scope_roundtrips_and_helper() {
+        use crate::models::package::{Package, SourceType};
+
+        let conn = open_memory().unwrap();
+        let mut pkg = Package::new(
+            "prep-scope-test".to_string(),
+            "Prep Scope".to_string(),
+            SourceType::Local,
+            None,
+            None,
+            "/tmp/prep-scope".to_string(),
+            false,
+            None,
+            false,
+            "branch".to_string(),
+        );
+        pkg.insert(&conn).unwrap();
+
+        let loaded = Package::get_by_identifier(&conn, "prep-scope-test")
+            .unwrap()
+            .expect("package exists");
+        assert_eq!(loaded.prepare_scope, "branch");
+        assert!(loaded.wants_per_branch_prepare());
+
+        // mutate via update
+        pkg.prepare_scope = "global".to_string();
+        pkg.update(&conn).unwrap();
+
+        let reloaded = Package::get_by_identifier(&conn, "prep-scope-test")
+            .unwrap()
+            .expect("still exists");
+        assert_eq!(reloaded.prepare_scope, "global");
+        assert!(!reloaded.wants_per_branch_prepare());
+    }
+
+    #[test]
+    fn prepared_context_insert_and_get_latest_apis() {
+        use crate::models::package::{Package, SourceType};
+        use crate::models::prepared_context::PreparedContext;
+
+        let mut conn = open_memory().unwrap();
+        let pkg = Package::new(
+            "prep-ctx-pkg".to_string(),
+            "PrepCtx".to_string(),
+            SourceType::Local,
+            None,
+            None,
+            "/tmp/prep-ctx".to_string(),
+            false,
+            None,
+            false,
+            "global".to_string(),
+        );
+        pkg.insert(&conn).unwrap();
+
+        let pc = PreparedContext::new(
+            pkg.id.clone(),
+            "compact orientation map\n- start: src/main.rs\n- build: cargo build".to_string(),
+            "claude".to_string(),
+            Some("claude-3-5-sonnet".to_string()),
+            Some("deadbeef123".to_string()),
+            None,
+            "global".to_string(),
+        );
+        pc.insert(&mut conn).unwrap();
+
+        let latest = PreparedContext::get_latest_for_package(&conn, &pkg.id)
+            .unwrap()
+            .expect("global prepared context should be retrievable");
+        assert_eq!(latest.content, pc.content);
+        assert_eq!(latest.harness, "claude");
+        assert_eq!(latest.prepare_scope_at_time, "global");
+        assert!(latest.git_branch.is_none());
+
+        // branch scoped path also works
+        let pc_branch = PreparedContext::new(
+            pkg.id.clone(),
+            "branch-specific".to_string(),
+            "claude".to_string(),
+            None,
+            None,
+            Some("feature-x".to_string()),
+            "branch".to_string(),
+        );
+        pc_branch.insert(&mut conn).unwrap();
+
+        let b = PreparedContext::get_latest_for_package_and_branch(&conn, &pkg.id, "feature-x")
+            .unwrap()
+            .expect("branch prepared should exist");
+        assert_eq!(b.content, "branch-specific");
     }
 }

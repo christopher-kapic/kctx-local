@@ -55,8 +55,15 @@ kcl packages add hono --git https://github.com/honojs/hono.git
 # original branch when they're done
 kcl packages add hono --git https://github.com/honojs/hono.git --branch next
 
+# Shallow clone (saves disk for large repos; still allows `kcl ask --branch other`
+# later, but truncates history — you cannot check out arbitrary old commits)
+kcl packages add big-monorepo --git https://github.com/example/big.git --shallow
+
 # Ask a question (uses the pinned branch `next` if one was set above)
 kcl ask hono "How does the router middleware work?"
+
+# One-time orientation pass (highly recommended for big codebases)
+kcl prepare hono
 
 # Override the pinned branch for a single question — kcl checks the override
 # out, pulls, answers, then restores the original branch

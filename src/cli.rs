@@ -51,6 +51,49 @@ pub enum Command {
         context: u32,
     },
 
+    /// Prepare a compact, high-signal orientation map for a package.
+    ///
+    /// Runs the harness once with a special prompt that asks it to describe
+    /// where important things live (directories, entry points, data models,
+    /// build commands, etc.) in the fewest tokens possible while remaining
+    /// maximally useful for future `kcl ask` sessions.
+    ///
+    /// The resulting map is stored and (by default) injected into every
+    /// subsequent `kcl ask` for this package. When the map is fresh, the ask
+    /// prompt instructs the agent to treat it as authoritative and skip a
+    /// broad tree scan, which can substantially reduce the initial
+    /// exploration phase on large or unfamiliar codebases. The benefit
+    /// varies by codebase and harness; small or already well-structured
+    /// repos may see little gain.
+    ///
+    /// Re-run this command after major refactors to refresh the map.
+    Prepare {
+        /// Package identifier
+        identifier: String,
+
+        /// Override harness for this preparation run
+        #[arg(long)]
+        harness: Option<String>,
+
+        /// Model forwarded to the harness (if the harness supports it)
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Override timeout in seconds for the preparation run
+        #[arg(long)]
+        timeout: Option<u64>,
+
+        /// Skip auto-pull even if enabled for this package
+        #[arg(long)]
+        no_pull: bool,
+
+        /// Check out this branch before preparing the map, then restore
+        /// the previously checked-out state. The map records the branch
+        /// and commit it was generated against.
+        #[arg(long)]
+        branch: Option<String>,
+    },
+
     /// List registered packages (alias for packages list)
     List {
         /// Verbose output (identifier, path, source type)
@@ -123,6 +166,12 @@ pub enum PackagesCommand {
         /// Git branch to clone (default: the remote's default branch)
         #[arg(long)]
         branch: Option<String>,
+
+        /// Clone with --depth 1 --no-single-branch (saves disk, still allows
+        /// checking out other branches later, but truncates history).
+        /// See `kcl packages show` for the recorded value and limitations.
+        #[arg(long)]
+        shallow: bool,
     },
 
     /// Remove a package
@@ -156,7 +205,7 @@ pub enum PackagesCommand {
         /// Package identifier
         identifier: String,
 
-        /// Property name (auto-pull, harness)
+        /// Property name (auto-pull, harness, prepare-scope, shallow)
         key: String,
 
         /// Property value

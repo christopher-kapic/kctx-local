@@ -16,6 +16,8 @@ pub struct Conversation {
     pub exit_code: Option<i32>,
     pub log_path: String,
     pub created_at: DateTime<Utc>,
+    pub git_commit_sha: Option<String>,
+    pub git_branch: Option<String>,
 }
 
 impl Conversation {
@@ -27,6 +29,8 @@ impl Conversation {
         harness: String,
         exit_code: Option<i32>,
         log_path: String,
+        git_commit_sha: Option<String>,
+        git_branch: Option<String>,
     ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -36,14 +40,16 @@ impl Conversation {
             exit_code,
             log_path,
             created_at: Utc::now(),
+            git_commit_sha,
+            git_branch,
         }
     }
 
     /// Insert this conversation into the database.
     pub fn insert(&self, conn: &Connection) -> Result<()> {
         conn.execute(
-            "INSERT INTO conversations (id, package_id, question, harness, exit_code, log_path, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO conversations (id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 self.id,
                 self.package_id,
@@ -51,6 +57,8 @@ impl Conversation {
                 self.harness,
                 self.exit_code,
                 self.log_path,
+                self.git_commit_sha.clone(),
+                self.git_branch.clone(),
                 self.created_at.to_rfc3339(),
             ],
         )
@@ -62,7 +70,7 @@ impl Conversation {
     #[cfg(test)]
     pub fn list_by_package(conn: &Connection, package_id: &str) -> Result<Vec<Self>> {
         let mut stmt = conn.prepare(
-            "SELECT id, package_id, question, harness, exit_code, log_path, created_at
+            "SELECT id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at
              FROM conversations WHERE package_id = ?1 ORDER BY created_at DESC",
         )?;
 
@@ -108,7 +116,7 @@ impl Conversation {
                 let cutoff = Utc::now() - chrono::Duration::days(days as i64);
                 let cutoff_str = cutoff.to_rfc3339();
                 let mut stmt = conn.prepare(
-                    "SELECT id, package_id, question, harness, exit_code, log_path, created_at
+                    "SELECT id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at
                      FROM conversations WHERE package_id = ?1 AND created_at >= ?2
                      ORDER BY created_at DESC LIMIT ?3",
                 )?;
@@ -121,7 +129,7 @@ impl Conversation {
             }
             None => {
                 let mut stmt = conn.prepare(
-                    "SELECT id, package_id, question, harness, exit_code, log_path, created_at
+                    "SELECT id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at
                      FROM conversations WHERE package_id = ?1
                      ORDER BY created_at DESC LIMIT ?2",
                 )?;
@@ -139,7 +147,7 @@ impl Conversation {
     /// Retrieve a single conversation by its UUID.
     pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Self>> {
         let mut stmt = conn.prepare(
-            "SELECT id, package_id, question, harness, exit_code, log_path, created_at
+            "SELECT id, package_id, question, harness, exit_code, log_path, git_commit_sha, git_branch, created_at
              FROM conversations WHERE id = ?1",
         )?;
 
@@ -151,7 +159,7 @@ impl Conversation {
     }
 
     fn from_row_inner(row: &rusqlite::Row) -> Result<Self> {
-        let created_str: String = row.get(6)?;
+        let created_str: String = row.get(8)?;
         Ok(Self {
             id: row.get(0)?,
             package_id: row.get(1)?,
@@ -159,6 +167,8 @@ impl Conversation {
             harness: row.get(3)?,
             exit_code: row.get(4)?,
             log_path: row.get(5)?,
+            git_commit_sha: row.get(6)?,
+            git_branch: row.get(7)?,
             created_at: DateTime::parse_from_rfc3339(&created_str)
                 .context("invalid created_at")?
                 .with_timezone(&Utc),
@@ -182,6 +192,8 @@ mod tests {
             format!("/tmp/{identifier}"),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(conn).unwrap();
         pkg
@@ -198,6 +210,8 @@ mod tests {
             "claude".to_string(),
             Some(0),
             "/tmp/logs/conv1.json".to_string(),
+            None,
+            None,
         );
         conv1.insert(&conn).unwrap();
 
@@ -207,6 +221,8 @@ mod tests {
             "claude".to_string(),
             Some(0),
             "/tmp/logs/conv2.json".to_string(),
+            None,
+            None,
         );
         conv2.insert(&conn).unwrap();
 
@@ -228,6 +244,8 @@ mod tests {
             "copilot".to_string(),
             None,
             "/tmp/logs/conv3.json".to_string(),
+            None,
+            None,
         );
         conv.insert(&conn).unwrap();
 
@@ -261,6 +279,8 @@ mod tests {
             "claude".to_string(),
             Some(0),
             "/tmp/logs/cascade.json".to_string(),
+            None,
+            None,
         );
         conv.insert(&conn).unwrap();
 
@@ -284,6 +304,8 @@ mod tests {
             "claude".to_string(),
             Some(0),
             "/tmp/logs/orphan.json".to_string(),
+            None,
+            None,
         );
 
         // Should fail due to foreign key constraint.

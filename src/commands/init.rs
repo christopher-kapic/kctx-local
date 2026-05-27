@@ -26,6 +26,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
                 default_model: None,
+                prepared_args: vec![],
             },
         ),
         (
@@ -44,6 +45,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 // `--model=claude-sonnet-4.6` or `--model=gpt-5.2`).
                 model_args: vec!["--model={model}".to_string()],
                 default_model: None,
+                prepared_args: vec![],
             },
         ),
         (
@@ -56,6 +58,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 // `openai/gpt-4o`, `sonnet:high`).
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
                 default_model: None,
+                prepared_args: vec![],
             },
         ),
         (
@@ -69,6 +72,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 // (e.g. `anthropic/claude-sonnet-4-20250514`).
                 model_args: vec!["-m".to_string(), "{model}".to_string()],
                 default_model: None,
+                prepared_args: vec![],
             },
         ),
         (
@@ -93,6 +97,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 // codex accepts `-m <model>` / `--model <model>`.
                 model_args: vec!["-m".to_string(), "{model}".to_string()],
                 default_model: None,
+                prepared_args: vec![],
             },
         ),
         (
@@ -114,6 +119,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 // clear this and set the env var ambient.
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
                 default_model: None,
+                prepared_args: vec![],
             },
         ),
     ]
@@ -543,6 +549,7 @@ mod tests {
                         prompt_mode: PromptMode::Arg,
                         model_args: vec![],
                         default_model: None,
+                        prepared_args: vec![],
                     },
                 );
                 m
@@ -558,6 +565,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
         new_harnesses.insert(
@@ -568,6 +576,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
 
@@ -602,6 +611,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
 
@@ -708,6 +718,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
         config.clone_dir = "/my/custom/dir".to_string();
@@ -724,6 +735,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
         new_harnesses.insert(
@@ -734,6 +746,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
 
