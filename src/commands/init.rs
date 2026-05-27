@@ -9,7 +9,7 @@ use clap_complete::{Shell, generate};
 use crate::cli::Cli;
 use crate::config::{
     Config, EmbeddingConfig, EmbeddingProvider, HarnessConfig, PromptMode,
-    validate_embedding_config,
+    default_embedding_model_for_provider, validate_embedding_config,
 };
 
 /// Bundled arguments for `kcl init`. Keeps the command surface tidy as new
@@ -299,24 +299,24 @@ fn env_var_for_provider(provider: EmbeddingProvider) -> &'static str {
     }
 }
 
-/// Per-provider model default. These are deliberately conservative,
-/// inexpensive choices that work out of the box for the question-memory
-/// use case.
-fn default_model_for_provider(provider: EmbeddingProvider) -> &'static str {
-    match provider {
-        EmbeddingProvider::Openai => "text-embedding-3-small",
-        EmbeddingProvider::Openrouter => "openai/text-embedding-3-small",
-    }
+/// Result of the embeddings portion of `kcl init`.
+///
+/// We need three states, not two:
+/// - preserve the existing config when the user didn't engage with embeddings
+/// - write a new embeddings section
+/// - explicitly remove the existing embeddings section
+enum EmbeddingChoice {
+    Preserve,
+    Set(EmbeddingConfig),
+    Disable,
 }
 
 /// Resolve the user's embeddings choice for `kcl init`.
 ///
 /// In non-interactive mode the three flags are authoritative: `--enable-embeddings`
 /// (with optional `--embedding-provider` / `--embedding-model`) wires up the
-/// section using sensible defaults. Without `--enable-embeddings` the function
-/// returns `None` — meaning the existing config's `embeddings` value is left
-/// as-is, which is also why we never *clear* the section without an explicit
-/// request from the user.
+/// section using sensible defaults. Passing `--embedding-provider` or
+/// `--embedding-model` also enables embeddings implicitly.
 ///
 /// In interactive mode we ask the user, biasing the default toward whatever
 /// they already have configured. If they answer yes we prompt for provider
@@ -330,19 +330,13 @@ fn resolve_embedding_choice(
     embedding_provider: Option<&str>,
     embedding_model: Option<&str>,
     existing: Option<EmbeddingConfig>,
-) -> Result<Option<EmbeddingConfig>> {
-    // Sanity: --embedding-provider / --embedding-model both require
-    // --enable-embeddings via clap, so we can assume one of them being Some
-    // implies enable_embeddings. Belt-and-suspenders the inverse:
-    if (embedding_provider.is_some() || embedding_model.is_some()) && !enable_embeddings {
-        anyhow::bail!(
-            "`--embedding-provider` and `--embedding-model` require `--enable-embeddings`"
-        );
-    }
+) -> Result<EmbeddingChoice> {
+    let embeddings_requested =
+        enable_embeddings || embedding_provider.is_some() || embedding_model.is_some();
 
     if non_interactive {
-        if !enable_embeddings {
-            return Ok(None);
+        if !embeddings_requested {
+            return Ok(EmbeddingChoice::Preserve);
         }
         let provider = match embedding_provider {
             Some(s) => s.parse::<EmbeddingProvider>()?,
@@ -353,8 +347,13 @@ fn resolve_embedding_choice(
         };
         let model = embedding_model
             .map(|s| s.to_string())
-            .or_else(|| existing.as_ref().map(|e| e.model.clone()))
-            .unwrap_or_else(|| default_model_for_provider(provider).to_string());
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .filter(|e| e.provider == provider)
+                    .map(|e| e.model.clone())
+            })
+            .unwrap_or_else(|| default_embedding_model_for_provider(provider).to_string());
         let cfg = EmbeddingConfig { provider, model };
         validate_embedding_config(&cfg)?;
         warn_if_api_key_missing(provider);
@@ -364,11 +363,11 @@ fn resolve_embedding_choice(
             cfg.model,
             env_var_for_provider(provider)
         );
-        return Ok(Some(cfg));
+        return Ok(EmbeddingChoice::Set(cfg));
     }
 
     // Interactive mode.
-    if enable_embeddings {
+    if embeddings_requested {
         // Caller already opted in via flag; skip the y/N prompt but still
         // prompt for the missing pieces.
         let provider = resolve_provider_interactive(embedding_provider, existing.as_ref())?;
@@ -376,7 +375,7 @@ fn resolve_embedding_choice(
         let cfg = EmbeddingConfig { provider, model };
         validate_embedding_config(&cfg)?;
         print_export_hint(&cfg);
-        return Ok(Some(cfg));
+        return Ok(EmbeddingChoice::Set(cfg));
     }
 
     // No flag — ask. Default to existing setting if any, otherwise N.
@@ -401,15 +400,14 @@ fn resolve_embedding_choice(
         matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes")
     };
     if !yes {
-        // User declined; preserve any existing config but don't overwrite.
-        return Ok(None);
+        return Ok(EmbeddingChoice::Disable);
     }
     let provider = resolve_provider_interactive(None, existing.as_ref())?;
     let model = resolve_model_interactive(None, provider, existing.as_ref())?;
     let cfg = EmbeddingConfig { provider, model };
     validate_embedding_config(&cfg)?;
     print_export_hint(&cfg);
-    Ok(Some(cfg))
+    Ok(EmbeddingChoice::Set(cfg))
 }
 
 /// Prompt the user to choose an embedding provider, falling back through:
@@ -467,11 +465,17 @@ fn resolve_model_interactive(
         if v.trim().is_empty() {
             anyhow::bail!("`--embedding-model` must not be empty");
         }
-        return Ok(v.to_string());
+        let model = v.trim().to_string();
+        validate_embedding_config(&EmbeddingConfig {
+            provider,
+            model: model.clone(),
+        })?;
+        return Ok(model);
     }
     let default = existing
+        .filter(|e| e.provider == provider)
         .map(|e| e.model.clone())
-        .unwrap_or_else(|| default_model_for_provider(provider).to_string());
+        .unwrap_or_else(|| default_embedding_model_for_provider(provider).to_string());
     eprint!("Embedding model [{}]: ", default);
     io::stderr().flush()?;
     let line = io::stdin().lock().lines().next();
@@ -482,6 +486,10 @@ fn resolve_model_interactive(
     if input.is_empty() {
         Ok(default)
     } else {
+        validate_embedding_config(&EmbeddingConfig {
+            provider,
+            model: input.clone(),
+        })?;
         Ok(input)
     }
 }
@@ -590,7 +598,7 @@ pub fn run(args: InitArgs<'_>) -> Result<()> {
 
     // 4b. Resolve embedding configuration (interactive prompt or non-interactive
     //     flags). May print an env-var export hint to stderr; never stores the key.
-    let new_embeddings = resolve_embedding_choice(
+    let embedding_choice = resolve_embedding_choice(
         non_interactive,
         enable_embeddings,
         embedding_provider,
@@ -620,12 +628,14 @@ pub fn run(args: InitArgs<'_>) -> Result<()> {
         }
     };
 
-    // Only overwrite embeddings when the user (or their flags) provided a
-    // choice. `None` here = "don't touch the existing setting" so a re-run of
-    // `kcl init` without `--enable-embeddings` doesn't wipe a previously
-    // configured embeddings section.
-    if let Some(emb) = new_embeddings {
-        config.embeddings = Some(emb);
+    match embedding_choice {
+        EmbeddingChoice::Preserve => {}
+        EmbeddingChoice::Set(emb) => {
+            config.embeddings = Some(emb);
+        }
+        EmbeddingChoice::Disable => {
+            config.embeddings = None;
+        }
     }
 
     config.save(&config_path)?;
@@ -807,6 +817,60 @@ mod tests {
         let map = build_harness_map(&detected);
         assert_eq!(map.len(), 1);
         assert!(map.contains_key("claude"));
+    }
+
+    #[test]
+    fn resolve_embedding_choice_preserves_existing_non_interactive_without_flags() {
+        let choice = resolve_embedding_choice(
+            true,
+            false,
+            None,
+            None,
+            Some(EmbeddingConfig {
+                provider: EmbeddingProvider::Openai,
+                model: "text-embedding-3-small".to_string(),
+            }),
+        )
+        .unwrap();
+
+        assert!(matches!(choice, EmbeddingChoice::Preserve));
+    }
+
+    #[test]
+    fn resolve_embedding_choice_provider_flag_implies_enable_non_interactive() {
+        let choice = resolve_embedding_choice(true, false, Some("openrouter"), None, None)
+            .unwrap();
+
+        match choice {
+            EmbeddingChoice::Set(cfg) => {
+                assert_eq!(cfg.provider, EmbeddingProvider::Openrouter);
+                assert_eq!(cfg.model, "openai/text-embedding-3-small");
+            }
+            _ => panic!("expected embeddings to be enabled from provider flag"),
+        }
+    }
+
+    #[test]
+    fn resolve_embedding_choice_provider_change_uses_new_provider_default_model() {
+        let choice = resolve_embedding_choice(
+            true,
+            true,
+            Some("openrouter"),
+            None,
+            Some(EmbeddingConfig {
+                provider: EmbeddingProvider::Openai,
+                model: "text-embedding-3-small".to_string(),
+            }),
+        )
+        .unwrap();
+
+        match choice {
+            EmbeddingChoice::Set(cfg) => {
+                assert_eq!(cfg.provider, EmbeddingProvider::Openrouter);
+                assert_eq!(cfg.model, "openai/text-embedding-3-small");
+            }
+            _ => panic!("expected updated embeddings config"),
+        }
     }
 
     #[test]

@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::cli::ConfigCommand;
-use crate::config::{Config, HarnessConfig, PromptMode, validate_harness_configured};
+use crate::config::{
+    Config, EmbeddingConfig, HarnessConfig, PromptMode,
+    default_embedding_model_for_provider, validate_embedding_config, validate_harness_configured,
+};
 use crate::paths;
 
 pub fn run(command: &ConfigCommand) -> Result<()> {
@@ -175,7 +178,20 @@ fn apply_set(path: &Path, key: &str, value: &str) -> Result<()> {
             // to validate against, so insert with `Default` here only.
             let p: crate::config::EmbeddingProvider = value.parse()?;
             let emb = config.embeddings.get_or_insert_with(Default::default);
-            emb.provider = p;
+            if emb.provider != p {
+                let old_provider = emb.provider;
+                let old_model = emb.model.clone();
+                emb.provider = p;
+                if old_model == default_embedding_model_for_provider(old_provider)
+                    || validate_embedding_config(&EmbeddingConfig {
+                        provider: p,
+                        model: old_model.clone(),
+                    })
+                    .is_err()
+                {
+                    emb.model = default_embedding_model_for_provider(p).to_string();
+                }
+            }
         }
         "embeddings.model" => {
             // Refuse to silently enable the embeddings feature by inserting a
@@ -191,6 +207,7 @@ fn apply_set(path: &Path, key: &str, value: &str) -> Result<()> {
                 bail!("embeddings.model must not be empty");
             }
             emb.model = value.to_string();
+            validate_embedding_config(emb)?;
         }
         _ if key.starts_with("harnesses.") => {
             // Support dot-notation for harness properties:
@@ -553,6 +570,39 @@ mod tests {
 
         let after = Config::load(&path).unwrap();
         assert_eq!(after.default_harness, "opencode");
+    }
+
+    #[test]
+    fn apply_set_embedding_provider_resets_default_model_for_new_provider() {
+        let (path, _cleanup) = setup_test_config();
+        let mut config = Config::load(&path).unwrap();
+        config.embeddings = Some(crate::config::EmbeddingConfig {
+            provider: crate::config::EmbeddingProvider::Openai,
+            model: "text-embedding-3-small".to_string(),
+        });
+        config.save(&path).unwrap();
+
+        super::apply_set(&path, "embeddings.provider", "openrouter").unwrap();
+
+        let after = Config::load(&path).unwrap();
+        let emb = after.embeddings.expect("embeddings should remain configured");
+        assert_eq!(emb.provider, crate::config::EmbeddingProvider::Openrouter);
+        assert_eq!(emb.model, "openai/text-embedding-3-small");
+    }
+
+    #[test]
+    fn apply_set_embedding_model_rejects_openai_provider_prefixed_model() {
+        let (path, _cleanup) = setup_test_config();
+        let mut config = Config::load(&path).unwrap();
+        config.embeddings = Some(crate::config::EmbeddingConfig {
+            provider: crate::config::EmbeddingProvider::Openai,
+            model: "text-embedding-3-small".to_string(),
+        });
+        config.save(&path).unwrap();
+
+        let err = super::apply_set(&path, "embeddings.model", "openai/text-embedding-3-small")
+            .unwrap_err();
+        assert!(err.to_string().contains("not valid for provider `openai`"));
     }
 
     #[test]

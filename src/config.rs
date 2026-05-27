@@ -136,7 +136,7 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             provider: EmbeddingProvider::Openai,
-            model: "text-embedding-3-small".to_string(),
+            model: default_embedding_model_for_provider(EmbeddingProvider::Openai).to_string(),
         }
     }
 }
@@ -166,10 +166,26 @@ pub fn validate_timeout(seconds: u64) -> Result<()> {
     Ok(())
 }
 
+/// Per-provider model default used by `kcl init` and `kcl config set`.
+pub fn default_embedding_model_for_provider(provider: EmbeddingProvider) -> &'static str {
+    match provider {
+        EmbeddingProvider::Openai => "text-embedding-3-small",
+        EmbeddingProvider::Openrouter => "openai/text-embedding-3-small",
+    }
+}
+
 /// Validate an `EmbeddingConfig` (called from `Config::load` and from `kcl config set` / `kcl init`).
 pub fn validate_embedding_config(cfg: &EmbeddingConfig) -> Result<()> {
-    if cfg.model.trim().is_empty() {
+    let model = cfg.model.trim();
+    if model.is_empty() {
         anyhow::bail!("`model` must not be empty in embeddings config");
+    }
+    if matches!(cfg.provider, EmbeddingProvider::Openai) && model.contains('/') {
+        anyhow::bail!(
+            "embedding model `{}` is not valid for provider `openai`; use an OpenAI model id without a provider prefix (for example `{}`)",
+            cfg.model,
+            default_embedding_model_for_provider(EmbeddingProvider::Openai)
+        );
     }
     Ok(())
 }
@@ -254,6 +270,11 @@ impl Config {
     /// Save config to the given path, creating parent directories as needed.
     /// Uses atomic temp-file + rename to prevent corruption on crash.
     pub fn save(&self, path: &Path) -> Result<()> {
+        validate_timeout(self.default_timeout)?;
+        if let Some(ref emb) = self.embeddings {
+            validate_embedding_config(emb)?;
+        }
+
         let parent = path
             .parent()
             .context("config path has no parent directory")?;
@@ -407,6 +428,35 @@ mod tests {
     }
 
     #[test]
+    fn validate_embedding_config_rejects_openai_provider_prefixed_model() {
+        let err = validate_embedding_config(&EmbeddingConfig {
+            provider: EmbeddingProvider::Openai,
+            model: "openai/text-embedding-3-small".to_string(),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("not valid for provider `openai`"));
+    }
+
+    #[test]
+    fn save_rejects_invalid_embedding_config() {
+        let dir = std::env::temp_dir().join("kcl-test-invalid-embedding-save");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let mut config = Config::default();
+        config.embeddings = Some(EmbeddingConfig {
+            provider: EmbeddingProvider::Openai,
+            model: "openai/text-embedding-3-small".to_string(),
+        });
+
+        let err = config.save(&path).unwrap_err();
+        assert!(err.to_string().contains("not valid for provider `openai`"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn load_rejects_zero_timeout() {
         let dir = std::env::temp_dir().join("kcl-test-zero-timeout");
         let path = dir.join("config.json");
@@ -419,6 +469,30 @@ mod tests {
 
         let err = Config::load(&path).unwrap_err();
         assert!(err.to_string().contains("at least 1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_rejects_invalid_embedding_config() {
+        let dir = std::env::temp_dir().join("kcl-test-invalid-embedding-load");
+        let path = dir.join("config.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+                "clone_dir":"/tmp",
+                "default_harness":"claude",
+                "embeddings":{
+                    "provider":"openai",
+                    "model":"openai/text-embedding-3-small"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let err = Config::load(&path).unwrap_err();
+        assert!(err.to_string().contains("not valid for provider `openai`"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
