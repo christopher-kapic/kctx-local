@@ -56,7 +56,18 @@ async fn main() {
 
         Command::Harnesses { command } => commands::harnesses::run(command).map(|()| 0),
 
-        Command::Init { non_interactive } => commands::init::run(*non_interactive).map(|()| 0),
+        Command::Init {
+            non_interactive,
+            enable_embeddings,
+            embedding_provider,
+            embedding_model,
+        } => commands::init::run(commands::init::InitArgs {
+            non_interactive: *non_interactive,
+            enable_embeddings: *enable_embeddings,
+            embedding_provider: embedding_provider.as_deref(),
+            embedding_model: embedding_model.as_deref(),
+        })
+        .map(|()| 0),
 
         // New intelligence commands (prepare map + semantic memory recall)
         c @ Command::Prepare { .. } => commands::prepare::run(c).await,

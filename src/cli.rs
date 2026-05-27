@@ -150,6 +150,24 @@ pub enum Command {
         /// Skip prompts, use auto-detected defaults
         #[arg(long)]
         non_interactive: bool,
+
+        /// Enable semantic question memory via embeddings. In
+        /// `--non-interactive` mode, the embeddings section is added without
+        /// prompting; in interactive mode this is equivalent to answering
+        /// "yes" to the embeddings prompt.
+        #[arg(long)]
+        enable_embeddings: bool,
+
+        /// Embedding provider to use when embeddings are enabled
+        /// (`openai` or `openrouter`). Implies `--enable-embeddings`.
+        #[arg(long, requires = "enable_embeddings")]
+        embedding_provider: Option<String>,
+
+        /// Embedding model identifier (e.g. `text-embedding-3-small`).
+        /// When omitted, a per-provider default is used. Implies
+        /// `--enable-embeddings`.
+        #[arg(long, requires = "enable_embeddings")]
+        embedding_model: Option<String>,
     },
 }
 

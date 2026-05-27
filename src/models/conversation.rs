@@ -4,6 +4,26 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Reject conversation-id inputs that contain anything other than lowercase
+/// hex digits or `-`. UUID v4s only ever use that character set, so the check
+/// never blocks a legitimate id; rejecting `%`, `_`, `\`, and any other
+/// character prevents a SQL `LIKE` wildcard (or escape) from slipping in via
+/// `get_by_id_or_prefix` and matching unrelated rows.
+fn validate_id_or_prefix(id_or_prefix: &str) -> Result<()> {
+    if id_or_prefix.is_empty() {
+        anyhow::bail!("Conversation id must not be empty.");
+    }
+    if !id_or_prefix
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase() || c == '-')
+    {
+        anyhow::bail!(
+            "Conversation id `{id_or_prefix}` is invalid — expected lowercase hex digits or `-` (matching a UUID prefix)."
+        );
+    }
+    Ok(())
+}
+
 /// A conversation log entry — an indexed record of a Q&A session.
 /// The full response text lives in a JSON log file on disk; this struct
 /// tracks metadata for fast listing and filtering.
@@ -161,7 +181,15 @@ impl Conversation {
     /// Retrieve by exact ID or a unique short prefix (e.g. first 8 chars of UUID).
     /// Errors with a clear message (using backticks) if the prefix matches >1 row.
     /// This powers `kcl remember <short-id>`.
+    ///
+    /// `id_or_prefix` is restricted to the conversation-id character set
+    /// (lowercase hex digits + `-`) before the SQL `LIKE` is run. UUIDs only
+    /// ever contain those characters, so a legitimate input is always
+    /// accepted; this prevents a `%` / `_` / `\` slipping into the LIKE
+    /// pattern and silently matching unrelated rows.
     pub fn get_by_id_or_prefix(conn: &Connection, id_or_prefix: &str) -> Result<Option<Self>> {
+        validate_id_or_prefix(id_or_prefix)?;
+
         // Fast path: exact match (handles full UUIDs or any exact id)
         if let Some(c) = Self::get_by_id(conn, id_or_prefix)? {
             return Ok(Some(c));
@@ -342,6 +370,41 @@ mod tests {
 
         // Should fail due to foreign key constraint.
         assert!(conv.insert(&conn).is_err());
+    }
+
+    #[test]
+    fn validate_id_or_prefix_accepts_uuids_and_short_prefixes() {
+        super::validate_id_or_prefix("a1b2c3d4").unwrap();
+        super::validate_id_or_prefix("a1b2c3d4-5678-1234-9abc-def012345678").unwrap();
+        // hex with hyphens
+        super::validate_id_or_prefix("a-b").unwrap();
+    }
+
+    #[test]
+    fn validate_id_or_prefix_rejects_like_wildcards_and_other_chars() {
+        for bad in &[
+            "",
+            "abc%",
+            "_abc",
+            "abc\\def",
+            "ABCDEF",
+            "abcg",
+            "hello world",
+            "../etc",
+        ] {
+            assert!(
+                super::validate_id_or_prefix(bad).is_err(),
+                "expected `{bad}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn get_by_id_or_prefix_rejects_like_wildcard() {
+        let conn = db::open_memory().unwrap();
+        // Even with no rows present, the validation gate must fire before SQL.
+        let err = Conversation::get_by_id_or_prefix(&conn, "abc%").unwrap_err();
+        assert!(err.to_string().contains("invalid"));
     }
 
     #[test]

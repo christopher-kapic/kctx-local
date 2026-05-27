@@ -86,6 +86,29 @@ impl EmbeddingConfig {
 /// literals (env var names, provider names, model names, URLs) are wrapped in
 /// backticks so they render nicely in terminals and agent output.
 pub async fn embed_question(cfg: &EmbeddingConfig, text: &str) -> Result<Vec<f32>> {
+    let base_url = default_base_url_for_provider(cfg.provider);
+    embed_question_against(cfg, text, base_url).await
+}
+
+/// The production `/v1` base URL for `provider`. Pulled out so tests (and
+/// any future ambient-config consumers) can point at a different host without
+/// duplicating the match.
+fn default_base_url_for_provider(provider: EmbeddingProvider) -> &'static str {
+    match provider {
+        EmbeddingProvider::Openai => "https://api.openai.com/v1",
+        EmbeddingProvider::Openrouter => "https://openrouter.ai/api/v1",
+    }
+}
+
+/// Same behavior as [`embed_question`] but with the OpenAI-compatible base URL
+/// supplied by the caller (e.g. `http://127.0.0.1:PORT/v1` for HTTP-mocked
+/// tests). Public only inside the crate; production code should call
+/// [`embed_question`] which fills in the standard provider URL.
+pub(crate) async fn embed_question_against(
+    cfg: &EmbeddingConfig,
+    text: &str,
+    base_url: &str,
+) -> Result<Vec<f32>> {
     if text.trim().is_empty() {
         bail!("cannot embed an empty or whitespace-only question");
     }
@@ -109,10 +132,6 @@ pub async fn embed_question(cfg: &EmbeddingConfig, text: &str) -> Result<Vec<f32
             )
         })?;
 
-    let base_url = match cfg.provider {
-        EmbeddingProvider::Openai => "https://api.openai.com/v1",
-        EmbeddingProvider::Openrouter => "https://openrouter.ai/api/v1",
-    };
     let url = format!("{}/embeddings", base_url);
     let provider_label = cfg.provider.as_str();
 
@@ -261,22 +280,25 @@ pub fn embedding_to_blob(emb: &[f32]) -> Vec<u8> {
 }
 
 /// Deserialize a little-endian `f32` byte blob back into a vector.
-/// Intended primarily for tests and debugging.  Panics if `bytes.len()` is
-/// not a multiple of 4 (caller must guarantee correct BLOBs from the DB).
-pub fn blob_to_embedding(bytes: &[u8]) -> Vec<f32> {
-    assert_eq!(
-        bytes.len() % 4,
-        0,
-        "BLOB length {} is not a multiple of 4 (corrupt embedding data)",
-        bytes.len()
-    );
-    bytes
+///
+/// Returns `Err` (rather than panicking) when `bytes.len()` is not a multiple
+/// of 4 so a single corrupt row in `conversation_embeddings` cannot crash
+/// `kcl ask` mid-similarity-search — callers are expected to log + skip the
+/// offending row.
+pub fn blob_to_embedding(bytes: &[u8]) -> Result<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        anyhow::bail!(
+            "embedding BLOB length {} is not a multiple of 4 (corrupt row); skipping",
+            bytes.len()
+        );
+    }
+    Ok(bytes
         .chunks_exact(4)
         .map(|chunk| {
             let arr: [u8; 4] = chunk.try_into().expect("chunks_exact guarantees 4 bytes");
             f32::from_le_bytes(arr)
         })
-        .collect()
+        .collect())
 }
 
 /// A semantically similar past question discovered via embeddings.
@@ -435,19 +457,27 @@ fn try_find_with_rust_cosine(
 
     let dim_i64 = dim as i64;
     let mut stmt = conn.prepare(sql)?;
+    // We fetch the raw blob here and decode it inside the loop so a single
+    // corrupt row can be logged and skipped without aborting the whole search.
     let rows = stmt.query_map(params![package_id, model, dim_i64], |row| {
         let id: String = row.get(0)?;
         let question: String = row.get(1)?;
         let bytes: Vec<u8> = row.get(2)?;
-        let emb = blob_to_embedding(&bytes);
-        Ok((id, question, emb))
+        Ok((id, question, bytes))
     })?;
 
     let mut scored: Vec<SimilarMemory> = Vec::new();
     for r in rows {
-        let (id, question, emb) = r?;
+        let (id, question, bytes) = r?;
+        let emb = match blob_to_embedding(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("warning: skipping conversation `{id}` in similarity search: {e:#}");
+                continue;
+            }
+        };
         if emb.len() != dim {
-            continue; // defensive
+            continue; // defensive: row stored under a different model dim
         }
         let sim = cosine_similarity(query, &emb);
         if sim >= threshold {
@@ -530,19 +560,132 @@ mod tests {
 
     #[test]
     fn blob_roundtrip_is_exact() {
-        let original = vec![0.0_f32, -1.5, 3.14159, 1e-10, 999.999];
+        let original = vec![0.0_f32, -1.5, std::f32::consts::PI, 1e-10, 999.999];
         let blob = embedding_to_blob(&original);
         assert_eq!(blob.len(), original.len() * 4);
-        let restored = blob_to_embedding(&blob);
+        let restored = blob_to_embedding(&blob).expect("valid blob should decode");
         for (a, b) in original.iter().zip(restored.iter()) {
             assert!((a - b).abs() < 1e-6);
         }
     }
 
     #[test]
-    #[should_panic]
     fn blob_to_embedding_rejects_bad_length() {
-        let _ = blob_to_embedding(&[0u8, 0, 0]); // 3 bytes
+        let err = blob_to_embedding(&[0u8, 0, 0]).unwrap_err();
+        assert!(err.to_string().contains("not a multiple of 4"));
+    }
+
+    #[test]
+    fn find_similar_uses_registered_sqlite_vec_extension() {
+        // Exercise the fast (sqlite-vec) path against the *real* migrated
+        // schema. `db::open_memory` registers the extension; the resulting
+        // connection's `vec_distance_cosine` is what `find_similar_questions`
+        // will dispatch to. This complements the fallback-only test above.
+        use crate::db;
+        use crate::models::conversation::Conversation;
+        use crate::models::package::{Package, SourceType};
+
+        let conn = db::open_memory().unwrap();
+        // Sanity: the extension's marker function must be callable here so we
+        // know we are exercising the fast path and not the Rust fallback.
+        let _: String = conn
+            .query_row("SELECT vec_version()", [], |row| row.get(0))
+            .expect("sqlite-vec functions should be available via db::open_memory");
+
+        let pkg = Package::new(
+            "vec-pkg".to_string(),
+            "vec-pkg".to_string(),
+            SourceType::Local,
+            None,
+            None,
+            "/tmp/vec-pkg".to_string(),
+            false,
+            None,
+            false,
+            "global".to_string(),
+        );
+        pkg.insert(&conn).unwrap();
+
+        // Two real conversations + their embeddings via the actual schema.
+        for (q, emb) in [("near", vec![0.99_f32, 0.1]), ("far", vec![0.0_f32, 1.0])] {
+            let conv = Conversation::new(
+                pkg.id.clone(),
+                q.to_string(),
+                "claude".to_string(),
+                Some(0),
+                format!("/tmp/{}.json", q),
+                None,
+                None,
+            );
+            conv.insert(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO conversation_embeddings (conversation_id, model, dim, embedding, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![conv.id, "m", 2_i64, embedding_to_blob(&emb), "2026-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+
+        let results = find_similar_questions(&conn, &pkg.id, &[1.0_f32, 0.0], "m", 2, 5, 0.5);
+        // Only the near vector should clear the 0.5 threshold.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].question, "near");
+        assert!(results[0].similarity > 0.95);
+    }
+
+    #[test]
+    fn find_similar_skips_corrupt_blob_row() {
+        // Seed one good and one corrupt row; the corrupt one must be skipped
+        // rather than crashing the search.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE packages (id TEXT PRIMARY KEY);
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                package_id TEXT NOT NULL,
+                question TEXT NOT NULL
+            );
+            CREATE TABLE conversation_embeddings (
+                conversation_id TEXT PRIMARY KEY,
+                model TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at TEXT
+            );
+            ",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO packages (id) VALUES ('pkg1')", [])
+            .unwrap();
+        // Good row.
+        conn.execute(
+            "INSERT INTO conversations (id, package_id, question) VALUES ('good', 'pkg1', 'q-good')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_embeddings (conversation_id, model, dim, embedding) \
+             VALUES ('good', 'm', 2, ?)",
+            params![embedding_to_blob(&[1.0_f32, 0.0])],
+        )
+        .unwrap();
+        // Corrupt row: dim says 2 (8 bytes) but blob has 3 bytes.
+        conn.execute(
+            "INSERT INTO conversations (id, package_id, question) VALUES ('bad', 'pkg1', 'q-bad')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_embeddings (conversation_id, model, dim, embedding) \
+             VALUES ('bad', 'm', 2, ?)",
+            params![vec![0u8, 0, 0]],
+        )
+        .unwrap();
+
+        let results = find_similar_questions(&conn, "pkg1", &[1.0_f32, 0.0], "m", 2, 5, 0.5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "good");
     }
 
     // ---------- error paths that do not require the network ----------
@@ -645,6 +788,155 @@ mod tests {
         assert_eq!(results[0].id, "conv-1");
         assert!(results[0].similarity > 0.98);
         assert_eq!(results[0].question, "How do I build?");
+    }
+
+    // ---------- HTTP-mocked tests for `embed_question_against` ----------
+
+    /// Spawn a minimal one-shot HTTP server that responds with `status_line`
+    /// (e.g. `"200 OK"`) and `body` to a single request, then closes. Returns
+    /// the base URL (without the trailing `/embeddings`) that the embeddings
+    /// client should be pointed at.
+    ///
+    /// Implemented with `tokio::net::TcpListener` and raw `AsyncReadExt` /
+    /// `AsyncWriteExt` so we don't pull in a mock-HTTP dependency. Adequate
+    /// for the small surface we need to cover.
+    async fn spawn_one_shot_http_server(status_line: &'static str, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{}/v1", addr);
+
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Read request headers (up to 8KB is plenty for our payloads).
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await; // best-effort; we don't validate the body
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status_line,
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        base
+    }
+
+    /// Set `OPENAI_API_KEY` for the duration of the returned guard so a test
+    /// can exercise the authenticated request path without depending on the
+    /// host's real env.
+    struct SetEnvVar {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl SetEnvVar {
+        fn new(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: test-only env mutation; restored on Drop.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            SetEnvVar { key, prev }
+        }
+    }
+
+    impl Drop for SetEnvVar {
+        fn drop(&mut self) {
+            // SAFETY: matches the unsafe set in `new`.
+            unsafe {
+                if let Some(v) = &self.prev {
+                    std::env::set_var(self.key, v);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_against_mock_200_returns_vector() {
+        let _key = SetEnvVar::new("OPENAI_API_KEY", "sk-test");
+        let body = r#"{"data":[{"embedding":[0.1,0.2,0.3,0.4]}]}"#;
+        let base = spawn_one_shot_http_server("200 OK", body).await;
+
+        let cfg = EmbeddingConfig {
+            provider: EmbeddingProvider::Openai,
+            model: "text-embedding-3-small".to_string(),
+        };
+        let v = embed_question_against(&cfg, "hello", &base).await.unwrap();
+        assert_eq!(v.len(), 4);
+        assert!((v[0] - 0.1).abs() < 1e-6);
+        assert!((v[3] - 0.4).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn embed_against_mock_401_surfaces_auth_error() {
+        let _key = SetEnvVar::new("OPENAI_API_KEY", "sk-test");
+        let body = r#"{"error":{"message":"bad key"}}"#;
+        let base = spawn_one_shot_http_server("401 Unauthorized", body).await;
+
+        let cfg = EmbeddingConfig {
+            provider: EmbeddingProvider::Openai,
+            model: "text-embedding-3-small".to_string(),
+        };
+        let err = embed_question_against(&cfg, "q", &base).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("authentication failed"));
+        assert!(msg.contains("`OPENAI_API_KEY`"));
+        assert!(msg.contains("401"));
+    }
+
+    #[tokio::test]
+    async fn embed_against_mock_429_surfaces_rate_limit() {
+        let _key = SetEnvVar::new("OPENROUTER_API_KEY", "sk-or-test");
+        let body = r#"{"error":{"message":"slow down"}}"#;
+        let base = spawn_one_shot_http_server("429 Too Many Requests", body).await;
+
+        let cfg = EmbeddingConfig {
+            provider: EmbeddingProvider::Openrouter,
+            model: "openai/text-embedding-3-small".to_string(),
+        };
+        let err = embed_question_against(&cfg, "q", &base).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("rate limit"));
+        assert!(msg.contains("429"));
+        assert!(msg.contains("`openrouter`"));
+    }
+
+    #[tokio::test]
+    async fn embed_against_mock_500_surfaces_generic_error() {
+        let _key = SetEnvVar::new("OPENAI_API_KEY", "sk-test");
+        let body = "internal server error";
+        let base = spawn_one_shot_http_server("500 Internal Server Error", body).await;
+
+        let cfg = EmbeddingConfig {
+            provider: EmbeddingProvider::Openai,
+            model: "text-embedding-3-small".to_string(),
+        };
+        let err = embed_question_against(&cfg, "q", &base).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("500"));
+        assert!(msg.contains("`openai`"));
+    }
+
+    #[tokio::test]
+    async fn embed_against_mock_empty_data_array_errors() {
+        let _key = SetEnvVar::new("OPENAI_API_KEY", "sk-test");
+        let body = r#"{"data":[]}"#;
+        let base = spawn_one_shot_http_server("200 OK", body).await;
+
+        let cfg = EmbeddingConfig {
+            provider: EmbeddingProvider::Openai,
+            model: "text-embedding-3-small".to_string(),
+        };
+        let err = embed_question_against(&cfg, "q", &base).await.unwrap_err();
+        assert!(err.to_string().contains("no `data[0].embedding` entry"));
     }
 
     // Helper to temporarily remove an env var and restore it afterwards.

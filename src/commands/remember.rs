@@ -48,25 +48,38 @@ pub fn run(cmd: &Command) -> Result<()> {
 
     // Pretty-print for humans and agents.
     // We parse the log (new fields are present on fresh logs; old logs get defaults).
-    let log: ConversationLog = serde_json::from_str(&content).unwrap_or_else(|_| {
-        // Fallback: synthesize from what we have if the JSON is from an older schema.
-        ConversationLog {
-            id: conv.id.clone(),
-            package_id: conv.package_id.clone(),
-            package_identifier: conv.package_id.clone(),
-            question: conv.question.clone(),
-            harness: conv.harness.clone(),
-            model: None,
-            started_at: conv.created_at.to_rfc3339(),
-            finished_at: conv.created_at.to_rfc3339(),
-            exit_code: conv.exit_code,
-            response: "<unable to parse full log; showing index metadata only>".to_string(),
-            pull_error: None,
-            git_commit_sha: conv.git_commit_sha.clone(),
-            git_branch: conv.git_branch.clone(),
-            prepare_scope: "global".to_string(),
+    let log: ConversationLog = match serde_json::from_str(&content) {
+        Ok(log) => log,
+        Err(parse_err) => {
+            // Surface the parse failure on stderr — silently substituting a
+            // placeholder hid the fact that the log was corrupt or from an
+            // incompatible schema, which made debugging surprising. The
+            // synthesized stub still gets printed so the user sees what
+            // index-level metadata is available.
+            eprintln!(
+                "warning: failed to parse log file {} for conversation `{}`: {:#}",
+                log_path.display(),
+                id,
+                parse_err
+            );
+            ConversationLog {
+                id: conv.id.clone(),
+                package_id: conv.package_id.clone(),
+                package_identifier: conv.package_id.clone(),
+                question: conv.question.clone(),
+                harness: conv.harness.clone(),
+                model: None,
+                started_at: conv.created_at.to_rfc3339(),
+                finished_at: conv.created_at.to_rfc3339(),
+                exit_code: conv.exit_code,
+                response: "<unable to parse full log; showing index metadata only>".to_string(),
+                pull_error: None,
+                git_commit_sha: conv.git_commit_sha.clone(),
+                git_branch: conv.git_branch.clone(),
+                prepare_scope: "global".to_string(),
+            }
         }
-    });
+    };
 
     println!("ID:                {}", log.id);
     println!(

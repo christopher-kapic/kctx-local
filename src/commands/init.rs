@@ -7,7 +7,21 @@ use clap::CommandFactory;
 use clap_complete::{Shell, generate};
 
 use crate::cli::Cli;
-use crate::config::{Config, HarnessConfig, PromptMode};
+use crate::config::{
+    Config, EmbeddingConfig, EmbeddingProvider, HarnessConfig, PromptMode,
+    validate_embedding_config,
+};
+
+/// Bundled arguments for `kcl init`. Keeps the command surface tidy as new
+/// embedding-related flags pile up while still letting `main.rs` build the
+/// struct from clap-parsed fields. All embedding-related fields default to
+/// "feature off" so existing call sites need no changes when adding new ones.
+pub struct InitArgs<'a> {
+    pub non_interactive: bool,
+    pub enable_embeddings: bool,
+    pub embedding_provider: Option<&'a str>,
+    pub embedding_model: Option<&'a str>,
+}
 
 /// Known harness definitions — built-in templates for common coding agents.
 fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
@@ -274,6 +288,243 @@ fn merge_config(
     }
 }
 
+/// Returns the env-var name the embeddings client expects for `provider`.
+/// Used by `resolve_embedding_choice` to (a) print the export instruction
+/// shown to the user and (b) probe for an already-set key so we can warn
+/// when it's missing in non-interactive flows.
+fn env_var_for_provider(provider: EmbeddingProvider) -> &'static str {
+    match provider {
+        EmbeddingProvider::Openai => "OPENAI_API_KEY",
+        EmbeddingProvider::Openrouter => "OPENROUTER_API_KEY",
+    }
+}
+
+/// Per-provider model default. These are deliberately conservative,
+/// inexpensive choices that work out of the box for the question-memory
+/// use case.
+fn default_model_for_provider(provider: EmbeddingProvider) -> &'static str {
+    match provider {
+        EmbeddingProvider::Openai => "text-embedding-3-small",
+        EmbeddingProvider::Openrouter => "openai/text-embedding-3-small",
+    }
+}
+
+/// Resolve the user's embeddings choice for `kcl init`.
+///
+/// In non-interactive mode the three flags are authoritative: `--enable-embeddings`
+/// (with optional `--embedding-provider` / `--embedding-model`) wires up the
+/// section using sensible defaults. Without `--enable-embeddings` the function
+/// returns `None` — meaning the existing config's `embeddings` value is left
+/// as-is, which is also why we never *clear* the section without an explicit
+/// request from the user.
+///
+/// In interactive mode we ask the user, biasing the default toward whatever
+/// they already have configured. If they answer yes we prompt for provider
+/// and model (defaulting to per-provider sane choices) and print a one-line
+/// `export <VAR>=...` hint pointing at the env var the embeddings client
+/// will look up at call time. The API key itself is never read or stored
+/// here — only the provider + model.
+fn resolve_embedding_choice(
+    non_interactive: bool,
+    enable_embeddings: bool,
+    embedding_provider: Option<&str>,
+    embedding_model: Option<&str>,
+    existing: Option<EmbeddingConfig>,
+) -> Result<Option<EmbeddingConfig>> {
+    // Sanity: --embedding-provider / --embedding-model both require
+    // --enable-embeddings via clap, so we can assume one of them being Some
+    // implies enable_embeddings. Belt-and-suspenders the inverse:
+    if (embedding_provider.is_some() || embedding_model.is_some()) && !enable_embeddings {
+        anyhow::bail!(
+            "`--embedding-provider` and `--embedding-model` require `--enable-embeddings`"
+        );
+    }
+
+    if non_interactive {
+        if !enable_embeddings {
+            return Ok(None);
+        }
+        let provider = match embedding_provider {
+            Some(s) => s.parse::<EmbeddingProvider>()?,
+            None => existing
+                .as_ref()
+                .map(|e| e.provider)
+                .unwrap_or(EmbeddingProvider::Openai),
+        };
+        let model = embedding_model
+            .map(|s| s.to_string())
+            .or_else(|| existing.as_ref().map(|e| e.model.clone()))
+            .unwrap_or_else(|| default_model_for_provider(provider).to_string());
+        let cfg = EmbeddingConfig { provider, model };
+        validate_embedding_config(&cfg)?;
+        warn_if_api_key_missing(provider);
+        eprintln!(
+            "Embeddings enabled: provider `{}`, model `{}`. Set `{}` in your shell to activate.",
+            cfg.provider,
+            cfg.model,
+            env_var_for_provider(provider)
+        );
+        return Ok(Some(cfg));
+    }
+
+    // Interactive mode.
+    if enable_embeddings {
+        // Caller already opted in via flag; skip the y/N prompt but still
+        // prompt for the missing pieces.
+        let provider = resolve_provider_interactive(embedding_provider, existing.as_ref())?;
+        let model = resolve_model_interactive(embedding_model, provider, existing.as_ref())?;
+        let cfg = EmbeddingConfig { provider, model };
+        validate_embedding_config(&cfg)?;
+        print_export_hint(&cfg);
+        return Ok(Some(cfg));
+    }
+
+    // No flag — ask. Default to existing setting if any, otherwise N.
+    let default_yes = existing.is_some();
+    let default_label = if default_yes { "Y/n" } else { "y/N" };
+    eprint!(
+        "Enable semantic question memory with embeddings? [{}]: ",
+        default_label
+    );
+    io::stderr().flush()?;
+    let stdin = io::stdin();
+    let answered = stdin
+        .lock()
+        .lines()
+        .next()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    let answer = answered.trim();
+    let yes = if answer.is_empty() {
+        default_yes
+    } else {
+        matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes")
+    };
+    if !yes {
+        // User declined; preserve any existing config but don't overwrite.
+        return Ok(None);
+    }
+    let provider = resolve_provider_interactive(None, existing.as_ref())?;
+    let model = resolve_model_interactive(None, provider, existing.as_ref())?;
+    let cfg = EmbeddingConfig { provider, model };
+    validate_embedding_config(&cfg)?;
+    print_export_hint(&cfg);
+    Ok(Some(cfg))
+}
+
+/// Prompt the user to choose an embedding provider, falling back through:
+/// 1. an explicit flag value (if Some — parsed via FromStr),
+/// 2. the existing config's provider (proposed as default),
+/// 3. OpenAI (the safe default).
+fn resolve_provider_interactive(
+    flag: Option<&str>,
+    existing: Option<&EmbeddingConfig>,
+) -> Result<EmbeddingProvider> {
+    if let Some(v) = flag {
+        return v.parse::<EmbeddingProvider>();
+    }
+    let default = existing
+        .map(|e| e.provider)
+        .unwrap_or(EmbeddingProvider::Openai);
+    let options = [EmbeddingProvider::Openai, EmbeddingProvider::Openrouter];
+    eprintln!("Embedding provider:");
+    for (i, p) in options.iter().enumerate() {
+        eprintln!("  [{}] {}", i + 1, p);
+    }
+    let default_idx = options.iter().position(|p| *p == default).unwrap_or(0);
+    eprint!("Select provider [{}]: ", default_idx + 1);
+    io::stderr().flush()?;
+    let line = io::stdin().lock().lines().next();
+    let input = match line {
+        Some(Ok(s)) => s.trim().to_string(),
+        _ => String::new(),
+    };
+    if input.is_empty() {
+        return Ok(options[default_idx]);
+    }
+    // Accept either the menu index or a literal provider name.
+    if let Ok(idx) = input.parse::<usize>() {
+        let i = idx
+            .checked_sub(1)
+            .ok_or_else(|| anyhow::anyhow!("selection out of range"))?;
+        return options
+            .get(i)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("selection out of range"));
+    }
+    input.parse::<EmbeddingProvider>()
+}
+
+/// Prompt the user for the model identifier with a sensible per-provider
+/// default. The default tracks the user's existing model setting if one was
+/// already configured.
+fn resolve_model_interactive(
+    flag: Option<&str>,
+    provider: EmbeddingProvider,
+    existing: Option<&EmbeddingConfig>,
+) -> Result<String> {
+    if let Some(v) = flag {
+        if v.trim().is_empty() {
+            anyhow::bail!("`--embedding-model` must not be empty");
+        }
+        return Ok(v.to_string());
+    }
+    let default = existing
+        .map(|e| e.model.clone())
+        .unwrap_or_else(|| default_model_for_provider(provider).to_string());
+    eprint!("Embedding model [{}]: ", default);
+    io::stderr().flush()?;
+    let line = io::stdin().lock().lines().next();
+    let input = match line {
+        Some(Ok(s)) => s.trim().to_string(),
+        _ => String::new(),
+    };
+    if input.is_empty() {
+        Ok(default)
+    } else {
+        Ok(input)
+    }
+}
+
+/// Emit a stderr warning if the env var that the embeddings client will read
+/// at call time isn't set yet. Used by `--non-interactive` flows so the user
+/// is told (without being prompted) that they still need to export the key.
+fn warn_if_api_key_missing(provider: EmbeddingProvider) {
+    let var = env_var_for_provider(provider);
+    let present = std::env::var(var)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .is_some();
+    if !present {
+        eprintln!(
+            "warning: env var `{}` is not set; `kcl ask` will skip embeddings until you export it",
+            var
+        );
+    }
+}
+
+/// Print the exact `export <VAR>=...` line a user will need so they don't
+/// have to remember which env var maps to which provider. Always to stderr
+/// (matches the rest of init's UX). Never reads or stores the key.
+fn print_export_hint(cfg: &EmbeddingConfig) {
+    let var = env_var_for_provider(cfg.provider);
+    eprintln!();
+    eprintln!(
+        "Embeddings configured: provider `{}`, model `{}`.",
+        cfg.provider, cfg.model
+    );
+    eprintln!("Set the API key in your shell (kcl never stores it):");
+    match cfg.provider {
+        EmbeddingProvider::Openai => {
+            eprintln!("  export {var}=\"sk-...\"        # https://platform.openai.com/api-keys");
+        }
+        EmbeddingProvider::Openrouter => {
+            eprintln!("  export {var}=\"sk-or-...\"     # https://openrouter.ai/keys");
+        }
+    }
+    warn_if_api_key_missing(cfg.provider);
+}
+
 /// Generate shell completion files for bash, zsh, and fish.
 fn generate_completions(completions_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(completions_dir).with_context(|| {
@@ -300,7 +551,14 @@ fn generate_completions(completions_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run(non_interactive: bool) -> Result<()> {
+pub fn run(args: InitArgs<'_>) -> Result<()> {
+    let InitArgs {
+        non_interactive,
+        enable_embeddings,
+        embedding_provider,
+        embedding_model,
+    } = args;
+
     // Load the existing config first (if any) so its values can be proposed
     // as defaults during the prompts.
     let config_path = crate::paths::config_file()?;
@@ -330,8 +588,18 @@ pub fn run(non_interactive: bool) -> Result<()> {
     // 4. Build harness map
     let harness_map = build_harness_map(&detected);
 
+    // 4b. Resolve embedding configuration (interactive prompt or non-interactive
+    //     flags). May print an env-var export hint to stderr; never stores the key.
+    let new_embeddings = resolve_embedding_choice(
+        non_interactive,
+        enable_embeddings,
+        embedding_provider,
+        embedding_model,
+        existing_config.as_ref().and_then(|c| c.embeddings.clone()),
+    )?;
+
     // 5. Apply choices to config — preserving prior harness customizations.
-    let config = if let Some(existing) = existing_config {
+    let mut config = if let Some(existing) = existing_config {
         let new_harness_names: Vec<String> = harness_map
             .keys()
             .filter(|k| !existing.harnesses.contains_key(*k))
@@ -351,6 +619,14 @@ pub fn run(non_interactive: bool) -> Result<()> {
             ..Config::default()
         }
     };
+
+    // Only overwrite embeddings when the user (or their flags) provided a
+    // choice. `None` here = "don't touch the existing setting" so a re-run of
+    // `kcl init` without `--enable-embeddings` doesn't wipe a previously
+    // configured embeddings section.
+    if let Some(emb) = new_embeddings {
+        config.embeddings = Some(emb);
+    }
 
     config.save(&config_path)?;
 

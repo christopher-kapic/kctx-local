@@ -391,9 +391,11 @@ async fn run_after_prepare_checkout(args: RunAfterPrepareCheckout<'_>) -> Result
             prepare_scope_at_time.clone(),
         );
 
-        match db::open(&db_path) {
-            Ok(conn2) => {
-                if let Err(e) = prepared.insert(&conn2) {
+        // Migrations were already run when this command opened the DB at the
+        // top of `run_prepare`; skip them on this post-harness reopen.
+        match db::open_no_migrate(&db_path) {
+            Ok(mut conn2) => {
+                if let Err(e) = prepared.insert(&mut conn2) {
                     eprintln!("warning: failed to store prepared context: {:#}", e);
                 } else {
                     eprintln!(
@@ -427,6 +429,14 @@ mod tests {
     use crate::models::package::SourceType;
     use std::env;
     use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    /// Serialize the prepare integration tests that mutate the process's XDG
+    /// env vars (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`).
+    /// Without this, parallel test threads race on those vars and observe
+    /// each other's temp directories. Async-aware [`tokio::sync::Mutex`]
+    /// because the guarded region awaits the harness subprocess.
+    static XDG_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
     #[test]
     fn sanitize_trims_whitespace() {
@@ -535,10 +545,15 @@ mod tests {
 
         // Write config with mock harness that always emits a fixed map.
         let cfg_path = crate::paths::config_file().unwrap();
-        let mut cfg = Config::default();
-        cfg.default_harness = "mock".to_string();
-        cfg.harnesses
-            .insert("mock".to_string(), make_mock_harness());
+        let cfg = Config {
+            default_harness: "mock".to_string(),
+            harnesses: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("mock".to_string(), make_mock_harness());
+                m
+            },
+            ..Config::default()
+        };
         cfg.save(&cfg_path).expect("save test config");
 
         // Create the package directory (and optionally turn it into a git repo with a commit).
@@ -594,6 +609,10 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_stores_map_for_global_scope() {
+        // Serialize all prepare integration tests on the shared XDG env vars.
+        // Tolerate a poisoned mutex (a previous test panic) by recovering the
+        // guard — the lock is only used to serialize, not to protect state.
+        let _guard = XDG_TEST_LOCK.lock().await;
         let (_tmp, ident) = setup_isolated_prepare_env("global", false);
 
         let cmd = Command::Prepare {
@@ -618,12 +637,12 @@ mod tests {
         assert_eq!(map.prepare_scope_at_time, "global");
     }
 
-    /// Requires true process-level XDG isolation for both the child binary *and* the
-    /// test process's own `paths::db_file()` calls. Marked ignore until the test
-    /// harness can reliably point the whole kcl crate at a temp DB for these flows.
+    /// Now passes because [`XDG_TEST_LOCK`] serializes the three integration
+    /// tests that mutate `XDG_*` env vars — previously they raced and
+    /// observed each other's temp directories.
     #[tokio::test]
-    #[ignore]
     async fn prepare_stores_map_for_branch_scope_and_records_commit() {
+        let _guard = XDG_TEST_LOCK.lock().await;
         let (_tmp, ident) = setup_isolated_prepare_env("branch", true);
 
         let cmd = Command::Prepare {
@@ -650,12 +669,10 @@ mod tests {
         assert_eq!(map.prepare_scope_at_time, "branch");
     }
 
-    /// Requires true process-level XDG isolation for both the child binary *and* the
-    /// test process's own `paths::db_file()` calls. Marked ignore until the test
-    /// harness can reliably point the whole kcl crate at a temp DB for these flows.
+    /// See [`XDG_TEST_LOCK`] — these tests are sequential by design.
     #[tokio::test]
-    #[ignore]
     async fn prepare_replaces_prior_map_for_same_scope() {
+        let _guard = XDG_TEST_LOCK.lock().await;
         let (_tmp, ident) = setup_isolated_prepare_env("global", false);
 
         // First prepare

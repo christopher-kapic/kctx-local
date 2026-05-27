@@ -1,14 +1,33 @@
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use rusqlite::auto_extension::{RawAutoExtension, register_auto_extension};
 use sqlite_vec::sqlite3_vec_init;
 
-static VEC_REGISTERED: std::sync::Once = std::sync::Once::new();
+/// Cached outcome of the one-shot `register_auto_extension` call. The stored
+/// `Result` is replayed on every subsequent `open`/`open_memory` so a failed
+/// first registration surfaces on every later attempt instead of being silently
+/// swallowed by a `Once` that only ran the closure once.
+static VEC_REGISTRATION: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
 /// Open (or create) the SQLite database at the given path and run migrations.
 pub fn open(path: &Path) -> Result<Connection> {
+    open_inner(path, true)
+}
+
+/// Open the SQLite database at `path` without running schema migrations.
+///
+/// Use this only on hot paths that have already opened the DB (and therefore
+/// already migrated) earlier in the same `kcl` invocation, but need to drop
+/// and reopen the connection to release WAL locks across a long-running
+/// subprocess (the harness). Caller guarantees the schema is already current.
+pub fn open_no_migrate(path: &Path) -> Result<Connection> {
+    open_inner(path, false)
+}
+
+fn open_inner(path: &Path, run_migrations: bool) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("could not create data directory: {}", parent.display()))?;
@@ -21,7 +40,9 @@ pub fn open(path: &Path) -> Result<Connection> {
         .with_context(|| format!("could not open database: {}", path.display()))?;
 
     apply_pragmas(&conn)?;
-    migrate(&conn)?;
+    if run_migrations {
+        migrate(&conn)?;
+    }
 
     Ok(conn)
 }
@@ -53,20 +74,28 @@ fn apply_pragmas(conn: &Connection) -> Result<()> {
 
 /// Register the sqlite-vec extension exactly once using the crate's static
 /// `sqlite3_vec_init` via rusqlite's `register_auto_extension`. This is
-/// idempotent across multiple calls to `open` / `open_memory`. Any failure
-/// produces a clear error mentioning `sqlite-vec`.
+/// idempotent across multiple calls to `open` / `open_memory`. The outcome of
+/// the first call is cached and replayed on every subsequent call: a failed
+/// initial registration therefore surfaces on every later `open`, instead of
+/// being silently dropped after the first attempt.
 fn register_sqlite_vec_extension() -> Result<()> {
-    let mut reg_err = None;
-    VEC_REGISTERED.call_once(|| unsafe {
-        let raw: RawAutoExtension = std::mem::transmute(sqlite3_vec_init as *const () as usize);
-        if let Err(e) = register_auto_extension(raw) {
-            reg_err = Some(e);
+    let outcome = VEC_REGISTRATION.get_or_init(|| {
+        // SAFETY: `sqlite3_vec_init` is the C-ABI initializer exported by the
+        // `sqlite-vec` crate. `RawAutoExtension` is a function pointer with the
+        // matching signature; transmuting between fn-pointer types of the same
+        // ABI is sound. `register_auto_extension` itself is `unsafe` because
+        // it hands the pointer to SQLite, but the precondition (a valid
+        // initializer with the expected signature) is satisfied here.
+        unsafe {
+            let raw: RawAutoExtension =
+                std::mem::transmute::<*const (), RawAutoExtension>(sqlite3_vec_init as _);
+            register_auto_extension(raw).map_err(|e| e.to_string())
         }
     });
-    if let Some(e) = reg_err {
-        anyhow::bail!("failed to register `sqlite-vec` auto-extension: {e}");
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(msg) => anyhow::bail!("failed to register `sqlite-vec` auto-extension: {msg}"),
     }
-    Ok(())
 }
 
 /// Run all schema migrations. Uses a simple user_version check.
@@ -435,7 +464,7 @@ mod tests {
         use crate::models::package::{Package, SourceType};
         use crate::models::prepared_context::PreparedContext;
 
-        let conn = open_memory().unwrap();
+        let mut conn = open_memory().unwrap();
         let pkg = Package::new(
             "prep-ctx-pkg".to_string(),
             "PrepCtx".to_string(),
@@ -459,7 +488,7 @@ mod tests {
             None,
             "global".to_string(),
         );
-        pc.insert(&conn).unwrap();
+        pc.insert(&mut conn).unwrap();
 
         let latest = PreparedContext::get_latest_for_package(&conn, &pkg.id)
             .unwrap()
@@ -479,7 +508,7 @@ mod tests {
             Some("feature-x".to_string()),
             "branch".to_string(),
         );
-        pc_branch.insert(&conn).unwrap();
+        pc_branch.insert(&mut conn).unwrap();
 
         let b = PreparedContext::get_latest_for_package_and_branch(&conn, &pkg.id, "feature-x")
             .unwrap()

@@ -170,12 +170,23 @@ fn apply_set(path: &Path, key: &str, value: &str) -> Result<()> {
             config.default_timeout = timeout;
         }
         "embeddings.provider" => {
+            // Setting the provider is the one entry point that may bring the
+            // embeddings section into existence — we still need a default model
+            // to validate against, so insert with `Default` here only.
             let p: crate::config::EmbeddingProvider = value.parse()?;
             let emb = config.embeddings.get_or_insert_with(Default::default);
             emb.provider = p;
         }
         "embeddings.model" => {
-            let emb = config.embeddings.get_or_insert_with(Default::default);
+            // Refuse to silently enable the embeddings feature by inserting a
+            // default OpenAI provider when the user only set the model. They
+            // must opt in by setting `embeddings.provider` first; otherwise a
+            // typo in the provider would never be caught.
+            let Some(emb) = config.embeddings.as_mut() else {
+                bail!(
+                    "set `embeddings.provider` before `embeddings.model`. Example: `kcl config set embeddings.provider openai` then `kcl config set embeddings.model text-embedding-3-small`"
+                );
+            };
             if value.is_empty() {
                 bail!("embeddings.model must not be empty");
             }

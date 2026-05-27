@@ -45,24 +45,30 @@ impl PreparedContext {
 
     /// Insert (replacing any prior map for the same (package_id, git_branch) key,
     /// where NULL branch represents the `global` scope).
-    /// The delete + insert is performed inside a transaction for safety.
-    pub fn insert(&self, conn: &Connection) -> Result<()> {
-        conn.execute("BEGIN IMMEDIATE", [])?;
+    ///
+    /// The delete + insert is performed inside a [`rusqlite::Transaction`] so
+    /// that a partial failure rolls back automatically via the Transaction's
+    /// `Drop` (default `DropBehavior::Rollback`) — we never end up with the
+    /// prior row deleted but the new one missing.
+    pub fn insert(&self, conn: &mut Connection) -> Result<()> {
+        let tx = conn
+            .transaction()
+            .context("failed to begin transaction for prepared context insert")?;
 
         // Remove prior entry for this scope key so re-prepare replaces.
         if self.git_branch.is_none() {
-            conn.execute(
+            tx.execute(
                 "DELETE FROM package_prepared_contexts WHERE package_id = ?1 AND git_branch IS NULL",
                 params![self.package_id],
             )?;
         } else {
-            conn.execute(
+            tx.execute(
                 "DELETE FROM package_prepared_contexts WHERE package_id = ?1 AND git_branch = ?2",
                 params![self.package_id, &self.git_branch],
             )?;
         }
 
-        let res = conn.execute(
+        tx.execute(
             "INSERT INTO package_prepared_contexts (id, package_id, content, created_at, harness, model, git_commit_sha, git_branch, prepare_scope_at_time)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -76,18 +82,12 @@ impl PreparedContext {
                 self.git_branch,
                 self.prepare_scope_at_time,
             ],
-        );
+        )
+        .context("failed to insert prepared context")?;
 
-        match res {
-            Ok(_) => {
-                conn.execute("COMMIT", [])?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = conn.execute("ROLLBACK", []);
-                Err(e).context("failed to insert prepared context")
-            }
-        }
+        tx.commit()
+            .context("failed to commit prepared context insert")?;
+        Ok(())
     }
 
     /// Fetch the latest global (branch IS NULL) prepared context for the package.
@@ -150,19 +150,49 @@ impl PreparedContext {
     }
 
     fn from_row(row: &rusqlite::Row) -> Result<Self> {
-        let created_str: String = row.get(3)?;
+        // Each column read is annotated with `.context` so a single corrupt
+        // column surfaces with a useful pointer ("id column", "harness column",
+        // …) instead of a bare `rusqlite::Error`. Matches the styling of the
+        // date-parse error below.
+        let id: String = row
+            .get(0)
+            .context("reading `id` column from prepared context row")?;
+        let package_id: String = row
+            .get(1)
+            .context("reading `package_id` column from prepared context row")?;
+        let content: String = row
+            .get(2)
+            .context("reading `content` column from prepared context row")?;
+        let created_str: String = row
+            .get(3)
+            .context("reading `created_at` column from prepared context row")?;
+        let harness: String = row
+            .get(4)
+            .context("reading `harness` column from prepared context row")?;
+        let model: Option<String> = row
+            .get(5)
+            .context("reading `model` column from prepared context row")?;
+        let git_commit_sha: Option<String> = row
+            .get(6)
+            .context("reading `git_commit_sha` column from prepared context row")?;
+        let git_branch: Option<String> = row
+            .get(7)
+            .context("reading `git_branch` column from prepared context row")?;
+        let prepare_scope_at_time: String = row
+            .get(8)
+            .context("reading `prepare_scope_at_time` column from prepared context row")?;
         Ok(Self {
-            id: row.get(0)?,
-            package_id: row.get(1)?,
-            content: row.get(2)?,
+            id,
+            package_id,
+            content,
             created_at: DateTime::parse_from_rfc3339(&created_str)
-                .context("invalid created_at in prepared context")?
+                .context("invalid `created_at` in prepared context")?
                 .with_timezone(&Utc),
-            harness: row.get(4)?,
-            model: row.get(5)?,
-            git_commit_sha: row.get(6)?,
-            git_branch: row.get(7)?,
-            prepare_scope_at_time: row.get(8)?,
+            harness,
+            model,
+            git_commit_sha,
+            git_branch,
+            prepare_scope_at_time,
         })
     }
 }
@@ -192,7 +222,7 @@ mod tests {
 
     #[test]
     fn insert_and_get_latest_global() {
-        let conn = db::open_memory().unwrap();
+        let mut conn = db::open_memory().unwrap();
         let pkg = insert_test_package(&conn, "prep-pkg");
 
         let ctx = PreparedContext::new(
@@ -204,7 +234,7 @@ mod tests {
             None,
             "global".to_string(),
         );
-        ctx.insert(&conn).unwrap();
+        ctx.insert(&mut conn).unwrap();
 
         let fetched = PreparedContext::get_latest_for_package(&conn, &pkg.id)
             .unwrap()
@@ -216,7 +246,7 @@ mod tests {
 
     #[test]
     fn insert_and_get_latest_for_branch() {
-        let conn = db::open_memory().unwrap();
+        let mut conn = db::open_memory().unwrap();
         let pkg = insert_test_package(&conn, "branch-prep");
 
         let ctx = PreparedContext::new(
@@ -228,7 +258,7 @@ mod tests {
             Some("main".to_string()),
             "branch".to_string(),
         );
-        ctx.insert(&conn).unwrap();
+        ctx.insert(&mut conn).unwrap();
 
         let fetched = PreparedContext::get_latest_for_package_and_branch(&conn, &pkg.id, "main")
             .unwrap()
@@ -239,7 +269,7 @@ mod tests {
 
     #[test]
     fn prepare_replaces_prior_for_scope() {
-        let conn = db::open_memory().unwrap();
+        let mut conn = db::open_memory().unwrap();
         let pkg = insert_test_package(&conn, "replace-prep");
 
         let first = PreparedContext::new(
@@ -251,7 +281,7 @@ mod tests {
             None,
             "global".to_string(),
         );
-        first.insert(&conn).unwrap();
+        first.insert(&mut conn).unwrap();
 
         let second = PreparedContext::new(
             pkg.id.clone(),
@@ -262,7 +292,7 @@ mod tests {
             None,
             "global".to_string(),
         );
-        second.insert(&conn).unwrap();
+        second.insert(&mut conn).unwrap();
 
         let latest = PreparedContext::get_latest_for_package(&conn, &pkg.id)
             .unwrap()

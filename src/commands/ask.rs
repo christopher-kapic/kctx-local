@@ -274,18 +274,29 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         }
     }
 
-    // 4. Capture provenance and load prepared map + semantic similar memories
-    //    *after* any checkout/pull so we record the exact state the harness sees.
-    let current_head_sha: Option<String> = if pkg.source_type == SourceType::Git {
+    // 4. Capture provenance (pre-harness) and load prepared map + semantic
+    //    similar memories. The pre-harness state is what the harness will
+    //    actually see at invocation; it drives the prepared-map lookup, the
+    //    staleness calculation, and the prompt header. The conversation log
+    //    later records the post-harness state (see below) so that a harness
+    //    which mutates HEAD does not get a misleading "answered at commit X"
+    //    record. The two are compared after the run with a stderr warning on
+    //    divergence.
+    let pre_harness_sha: Option<String> = if pkg.source_type == SourceType::Git {
         git::current_commit_sha(repo_path).await.ok()
     } else {
         None
     };
-    let current_branch: Option<String> = if pkg.source_type == SourceType::Git {
+    let pre_harness_branch: Option<String> = if pkg.source_type == SourceType::Git {
         git::current_branch(repo_path).await.ok().flatten()
     } else {
         None
     };
+    // Aliases kept under the original names so the rest of the function (which
+    // legitimately needs the pre-harness state — prepared-map lookup, prompt
+    // header, staleness math) reads unchanged.
+    let current_head_sha = pre_harness_sha.clone();
+    let current_branch = pre_harness_branch.clone();
 
     // Load the applicable prepared orientation map (global vs per-branch)
     // using the getters provided by the model. Errors are ignored (graceful).
@@ -327,23 +338,31 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         };
 
     // If embeddings configured, embed the current question and find similar
-    // prior conversations (same model+dim). Top 3 above 0.80 cosine.
-    let similar_memories: Vec<SimilarMemory> = if let Some(emb_cfg) = EmbeddingConfig::load() {
+    // prior conversations (same model+dim). Top 3 above 0.80 cosine. The
+    // computed embedding is retained in `cached_embedding` so the post-harness
+    // storage step can reuse it instead of calling the embeddings API a second
+    // time per `ask` (one API call, one network round-trip).
+    let (similar_memories, cached_embedding): (
+        Vec<SimilarMemory>,
+        Option<(EmbeddingConfig, Vec<f32>)>,
+    ) = if let Some(emb_cfg) = EmbeddingConfig::load() {
         match embed_question(&emb_cfg, question).await {
             Ok(emb) => {
                 let dim = emb.len();
-                find_similar_questions(&conn, &pkg.id, &emb, &emb_cfg.model, dim, 3, 0.80)
+                let sims =
+                    find_similar_questions(&conn, &pkg.id, &emb, &emb_cfg.model, dim, 3, 0.80);
+                (sims, Some((emb_cfg, emb)))
             }
             Err(e) => {
                 eprintln!(
                     "warning: failed to embed question for similarity search: {:#}",
                     e
                 );
-                Vec::new()
+                (Vec::new(), None)
             }
         }
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
 
     // 5. Build prompt (now receives prepared map + similar-memory hints).
@@ -400,6 +419,42 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
     .await;
 
     let finished_at = Utc::now();
+
+    // Re-capture provenance now that the harness has finished. Some harnesses
+    // can mutate HEAD (checkout, reset) during their exploration; recording
+    // *only* the pre-harness state would then attribute the answer to a commit
+    // the harness was no longer on. If the post-harness state differs from
+    // pre, we surface a single stderr warning (so users can spot
+    // misbehaving harnesses) and persist the post-harness values as
+    // authoritative. Best-effort: a git failure here falls back to the pre
+    // values rather than silently dropping provenance.
+    let post_harness_sha: Option<String> = if pkg.source_type == SourceType::Git {
+        git::current_commit_sha(repo_path).await.ok()
+    } else {
+        None
+    };
+    let post_harness_branch: Option<String> = if pkg.source_type == SourceType::Git {
+        git::current_branch(repo_path).await.ok().flatten()
+    } else {
+        None
+    };
+    let logged_commit_sha = post_harness_sha.clone().or_else(|| pre_harness_sha.clone());
+    let logged_branch = post_harness_branch
+        .clone()
+        .or_else(|| pre_harness_branch.clone());
+    if pre_harness_sha != post_harness_sha || pre_harness_branch != post_harness_branch {
+        let fmt = |sha: &Option<String>, br: &Option<String>| -> String {
+            let s = sha.as_deref().unwrap_or("none");
+            let b = br.as_deref().unwrap_or("none");
+            format!("commit `{}` on branch `{}`", s, b)
+        };
+        eprintln!(
+            "warning: harness `{}` changed HEAD during the run (pre: {}; post: {}); recording post-harness state on the conversation log",
+            harness_name,
+            fmt(&pre_harness_sha, &pre_harness_branch),
+            fmt(&post_harness_sha, &post_harness_branch)
+        );
+    }
 
     // Handle harness execution result. Regardless of success or failure we
     // persist a conversation record so every invocation appears in `kcl history`.
@@ -463,8 +518,8 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         exit_code,
         response: response_text,
         pull_error,
-        git_commit_sha: current_head_sha.clone(),
-        git_branch: current_branch.clone(),
+        git_commit_sha: logged_commit_sha.clone(),
+        git_branch: logged_branch.clone(),
         prepare_scope: pkg.prepare_scope.clone(),
     };
 
@@ -492,32 +547,24 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         exit_code,
         log_path: relative_log_path,
         created_at: started_at,
-        git_commit_sha: current_head_sha,
-        git_branch: current_branch,
+        git_commit_sha: logged_commit_sha,
+        git_branch: logged_branch,
     };
 
-    // Compute the optional embedding before starting any SQLite write
-    // transaction (or even before opening the DB). The embedding call may
-    // perform network I/O; we must not hold any write lock across the await.
+    // Reuse the embedding computed pre-harness for the similarity search. We
+    // do NOT re-embed here: that would double the API charges and the network
+    // round-trips per `ask` and could store a vector that differs from the one
+    // searched against. If the pre-harness embed failed (or embeddings are
+    // disabled), we simply skip storage — degrading gracefully matches the
+    // search path's behavior. `dim as i64` below is safe: embedding
+    // dimensions are tiny.
     let embedding_row = if matches!(exit_code, Some(0)) {
-        if let Some(emb_cfg) = EmbeddingConfig::load() {
-            match embed_question(&emb_cfg, question).await {
-                Ok(emb) => {
-                    let dim = emb.len();
-                    let blob = crate::embeddings::embedding_to_blob(&emb);
-                    let created_at = Utc::now().to_rfc3339();
-                    // (model, dim, blob, created_at) tuple for the optional row.
-                    // `dim as i64` below is safe: embedding dimensions are tiny.
-                    Some((emb_cfg.model, dim, blob, created_at))
-                }
-                Err(e) => {
-                    eprintln!("warning: failed to embed question for storage: {:#}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        }
+        cached_embedding.map(|(emb_cfg, emb)| {
+            let dim = emb.len();
+            let blob = crate::embeddings::embedding_to_blob(&emb);
+            let created_at = Utc::now().to_rfc3339();
+            (emb_cfg.model, dim, blob, created_at)
+        })
     } else {
         None
     };
@@ -562,7 +609,10 @@ fn record_conversation_and_embedding(
     conv_id: &str,
     embedding_row: Option<(String, usize, Vec<u8>, String)>,
 ) {
-    match db::open(db_path) {
+    // We already ran migrations once at the top of `run` — skip them here so a
+    // single ask doesn't poll `user_version` twice per invocation. `open_no_migrate`
+    // is documented as exactly this use case.
+    match db::open_no_migrate(db_path) {
         Ok(mut conn) => match conn.transaction() {
             Ok(tx) => {
                 if let Err(e) = conversation.insert(&tx) {
