@@ -47,6 +47,8 @@ pub struct Package {
     pub path: String,
     pub auto_pull: bool,
     pub harness: Option<String>,
+    pub shallow: bool,
+    pub prepare_scope: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -63,6 +65,8 @@ impl Package {
         path: String,
         auto_pull: bool,
         harness: Option<String>,
+        shallow: bool,
+        prepare_scope: String,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -75,6 +79,8 @@ impl Package {
             path,
             auto_pull,
             harness,
+            shallow,
+            prepare_scope,
             created_at: now,
             updated_at: now,
         }
@@ -83,8 +89,8 @@ impl Package {
     /// Insert this package into the database.
     pub fn insert(&self, conn: &Connection) -> Result<()> {
         conn.execute(
-            "INSERT INTO packages (id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO packages (id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, shallow, prepare_scope, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 self.id,
                 self.identifier,
@@ -95,6 +101,8 @@ impl Package {
                 self.path,
                 self.auto_pull as i32,
                 self.harness,
+                self.shallow as i32,
+                self.prepare_scope.clone(),
                 self.created_at.to_rfc3339(),
                 self.updated_at.to_rfc3339(),
             ],
@@ -106,7 +114,7 @@ impl Package {
     /// Retrieve a package by its human-readable identifier.
     pub fn get_by_identifier(conn: &Connection, identifier: &str) -> Result<Option<Self>> {
         let mut stmt = conn.prepare(
-            "SELECT id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, created_at, updated_at
+            "SELECT id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, shallow, prepare_scope, created_at, updated_at
              FROM packages WHERE identifier = ?1",
         )?;
 
@@ -122,7 +130,7 @@ impl Package {
     /// of cloning the same repo twice.
     pub fn get_by_source_url(conn: &Connection, source_url: &str) -> Result<Option<Self>> {
         let mut stmt = conn.prepare(
-            "SELECT id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, created_at, updated_at
+            "SELECT id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, shallow, prepare_scope, created_at, updated_at
              FROM packages WHERE source_url = ?1 ORDER BY created_at LIMIT 1",
         )?;
 
@@ -138,7 +146,7 @@ impl Package {
     #[allow(dead_code)]
     pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Self>> {
         let mut stmt = conn.prepare(
-            "SELECT id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, created_at, updated_at
+            "SELECT id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, shallow, prepare_scope, created_at, updated_at
              FROM packages WHERE id = ?1",
         )?;
 
@@ -164,7 +172,7 @@ impl Package {
     /// List all registered packages, ordered by identifier.
     pub fn list_all(conn: &Connection) -> Result<Vec<Self>> {
         let mut stmt = conn.prepare(
-            "SELECT id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, created_at, updated_at
+            "SELECT id, identifier, display_name, source_type, source_url, source_branch, path, auto_pull, harness, shallow, prepare_scope, created_at, updated_at
              FROM packages ORDER BY identifier",
         )?;
 
@@ -180,8 +188,8 @@ impl Package {
     /// Update a package's mutable fields.
     pub fn update(&self, conn: &Connection) -> Result<()> {
         let affected = conn.execute(
-            "UPDATE packages SET display_name = ?1, source_url = ?2, source_branch = ?3, path = ?4, auto_pull = ?5, harness = ?6, updated_at = ?7
-             WHERE id = ?8",
+            "UPDATE packages SET display_name = ?1, source_url = ?2, source_branch = ?3, path = ?4, auto_pull = ?5, harness = ?6, shallow = ?7, prepare_scope = ?8, updated_at = ?9
+             WHERE id = ?10",
             params![
                 self.display_name,
                 self.source_url,
@@ -189,6 +197,8 @@ impl Package {
                 self.path,
                 self.auto_pull as i32,
                 self.harness,
+                self.shallow as i32,
+                self.prepare_scope.clone(),
                 Utc::now().to_rfc3339(),
                 self.id,
             ],
@@ -208,11 +218,19 @@ impl Package {
         Ok(affected > 0)
     }
 
+    /// Returns true if the package is configured for per-branch prepared
+    /// contexts (vs a single `global` map reused across all branches).
+    pub fn wants_per_branch_prepare(&self) -> bool {
+        self.prepare_scope == "branch"
+    }
+
     fn from_row(row: &rusqlite::Row) -> Result<Self> {
         let source_type_str: String = row.get(3)?;
         let auto_pull_int: i32 = row.get(7)?;
-        let created_str: String = row.get(9)?;
-        let updated_str: String = row.get(10)?;
+        let shallow_int: i32 = row.get(9)?;
+        let prepare_scope: String = row.get(10)?;
+        let created_str: String = row.get(11)?;
+        let updated_str: String = row.get(12)?;
 
         Ok(Self {
             id: row.get(0)?,
@@ -224,6 +242,8 @@ impl Package {
             path: row.get(6)?,
             auto_pull: auto_pull_int != 0,
             harness: row.get(8)?,
+            shallow: shallow_int != 0,
+            prepare_scope,
             created_at: DateTime::parse_from_rfc3339(&created_str)
                 .context("invalid created_at")?
                 .with_timezone(&Utc),
@@ -249,6 +269,8 @@ mod tests {
             format!("/tmp/{identifier}"),
             false,
             None,
+            false,
+            "global".to_string(),
         )
     }
 
@@ -320,6 +342,8 @@ mod tests {
             "/home/user/src/kcl-packages/axum".to_string(),
             true,
             Some("claude".to_string()),
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
 
@@ -349,6 +373,8 @@ mod tests {
             "/clones/monorepo".to_string(),
             true,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
 
@@ -377,6 +403,8 @@ mod tests {
             "/clones/monorepo".to_string(),
             true,
             None,
+            false,
+            "global".to_string(),
         );
         a.insert(&conn).unwrap();
 
@@ -389,6 +417,8 @@ mod tests {
             "/clones/monorepo".to_string(),
             true,
             None,
+            false,
+            "global".to_string(),
         );
         b.insert(&conn).unwrap();
 

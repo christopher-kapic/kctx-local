@@ -113,6 +113,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
                 default_model: Some("claude-sonnet-4-6".to_string()),
+                prepared_args: vec![],
             },
         );
         harnesses.insert(
@@ -123,6 +124,7 @@ mod tests {
                 prompt_mode: PromptMode::Stdin,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
         Config {

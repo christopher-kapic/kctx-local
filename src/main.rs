@@ -56,6 +56,8 @@ async fn main() {
         Command::Harnesses { command } => commands::harnesses::run(command).map(|()| 0),
 
         Command::Init { non_interactive } => commands::init::run(*non_interactive).map(|()| 0),
+
+        c @ Command::Prepare { .. } => commands::prepare::run(c).await,
     };
 
     match result {

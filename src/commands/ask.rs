@@ -11,24 +11,38 @@ use crate::git::HeadState;
 use crate::harness;
 use crate::models::conversation::Conversation;
 use crate::models::package::{Package, SourceType};
+use crate::models::prepared_context::PreparedContext;
 use crate::paths;
 
 /// The JSON log file written to disk for each conversation.
 #[derive(Debug, Serialize, Deserialize)]
-struct ConversationLog {
-    id: String,
-    package_id: String,
-    package_identifier: String,
-    question: String,
-    harness: String,
+pub(crate) struct ConversationLog {
+    pub(crate) id: String,
+    pub(crate) package_id: String,
+    pub(crate) package_identifier: String,
+    pub(crate) question: String,
+    pub(crate) harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    started_at: String,
-    finished_at: String,
-    exit_code: Option<i32>,
-    response: String,
+    pub(crate) model: Option<String>,
+    pub(crate) started_at: String,
+    pub(crate) finished_at: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) response: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pull_error: Option<String>,
+    pub(crate) pull_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) git_commit_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) git_branch: Option<String>,
+    /// The value of the package's `prepare_scope` ("global" or "branch") at
+    /// the moment this `ask` was performed. Used by `kcl remember` for
+    /// provenance reporting.
+    #[serde(default = "default_prepare_scope")]
+    pub(crate) prepare_scope: String,
+}
+
+fn default_prepare_scope() -> String {
+    "global".to_string()
 }
 
 /// Arguments for a single `kcl ask` invocation.
@@ -68,6 +82,10 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
             identifier
         )
     })?;
+    // `pkg.shallow` is recorded at registration time. It currently only affects
+    // the initial `git clone` (see git.rs). It is not yet used to change
+    // harness invocation or prompt construction; the known history-truncation
+    // limitation of shallow clones applies to all operations on the package.
 
     // Drop the connection below once we've finished all DB reads (step 4) so
     // it isn't held open for the duration of the harness run, which could
@@ -255,7 +273,70 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         }
     }
 
-    // 4. Build prompt with optional context.
+    // 4. Capture provenance (pre-harness) and load prepared map + semantic
+    //    similar memories. The pre-harness state is what the harness will
+    //    actually see at invocation; it drives the prepared-map lookup, the
+    //    staleness calculation, and the prompt header. The conversation log
+    //    later records the post-harness state (see below) so that a harness
+    //    which mutates HEAD does not get a misleading "answered at commit X"
+    //    record. The two are compared after the run with a stderr warning on
+    //    divergence.
+    let pre_harness_sha: Option<String> = if pkg.source_type == SourceType::Git {
+        git::current_commit_sha(repo_path).await.ok()
+    } else {
+        None
+    };
+    let pre_harness_branch: Option<String> = if pkg.source_type == SourceType::Git {
+        git::current_branch(repo_path).await.ok().flatten()
+    } else {
+        None
+    };
+    // Aliases kept under the original names so the rest of the function (which
+    // legitimately needs the pre-harness state — prepared-map lookup, prompt
+    // header, staleness math) reads unchanged.
+    let current_head_sha = pre_harness_sha.clone();
+    let current_branch = pre_harness_branch.clone();
+
+    // Load the applicable prepared orientation map (global vs per-branch)
+    // using the getters provided by the model. Errors are ignored (graceful).
+    let prepared_context: Option<PreparedContext> = if pkg.wants_per_branch_prepare() {
+        if let Some(ref br) = current_branch {
+            PreparedContext::get_latest_for_package_and_branch(&conn, &pkg.id, br)
+                .ok()
+                .flatten()
+        } else {
+            PreparedContext::get_latest_for_package(&conn, &pkg.id)
+                .ok()
+                .flatten()
+        }
+    } else {
+        PreparedContext::get_latest_for_package(&conn, &pkg.id)
+            .ok()
+            .flatten()
+    };
+
+    // Pre-compute staleness distance while we are still async (git helper).
+    //
+    // Hot path: when the prepared map was recorded on the exact commit that is
+    // currently checked out, the map is definitionally fresh (0 commits
+    // behind). Compute that equality here and short-circuit so we do NOT spawn
+    // a `git rev-list` subprocess at all. (The git helper already returns 0
+    // for an equal range, but only after being awaited/spawned — this avoids
+    // the process entirely in the common prepared+unchanged case.) Behavior
+    // for the non-equal case is unchanged: we still ask git for the count.
+    let recorded_sha = prepared_context
+        .as_ref()
+        .and_then(|p| p.git_commit_sha.as_deref());
+    let commits_behind: Option<usize> =
+        match staleness_plan(recorded_sha, current_head_sha.as_deref()) {
+            StalenessPlan::None => None,
+            StalenessPlan::Fresh => Some(0),
+            StalenessPlan::AskGit { base, head } => {
+                git::commit_count_between(repo_path, base, head).await.ok()
+            }
+        };
+
+    // 5. Build prompt (with optional prepared map injection).
     let recent_questions = if context > 0 {
         Conversation::recent_questions(&conn, &pkg.id, context)?
     } else {
@@ -268,7 +349,15 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         Some(recent_questions.as_slice())
     };
 
-    let prompt = harness::build_prompt(&pkg.display_name, &pkg.identifier, question, context_slice);
+    let prompt = harness::build_prompt(
+        &pkg.display_name,
+        &pkg.identifier,
+        question,
+        context_slice,
+        prepared_context.as_ref(),
+        current_head_sha.as_deref(),
+        commits_behind,
+    );
 
     // Release the DB connection before the long-running harness invocation so
     // it doesn't hold WAL locks (or `busy_timeout` slots) while other `kcl`
@@ -280,29 +369,96 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
 
     let cwd = std::path::PathBuf::from(&pkg.path);
 
-    let harness_result = harness::run_harness(
+    // When a prepared orientation map was injected into the prompt, allow the
+    // harness config to append its `prepared_args` (e.g. `--max-turns`, a
+    // restricted `--allowedTools`) so exploration is mechanically capped even
+    // if the model ignores the prompt's "trust the map" guidance. With no map
+    // present this is `false` and the harness argv is unchanged (matching
+    // `kcl prepare`, which never gets `prepared_args`).
+    let map_present = prepared_context.is_some();
+
+    let harness_result = harness::run_harness_with_prepared_args(
         &harness_config,
         &prompt,
         &cwd,
         timeout,
         true, // stream stdout to caller
         effective_model.as_deref(),
+        map_present,
     )
     .await;
 
     let finished_at = Utc::now();
 
+    // Re-capture provenance now that the harness has finished. Some harnesses
+    // can mutate HEAD (checkout, reset) during their exploration; recording
+    // *only* the pre-harness state would then attribute the answer to a commit
+    // the harness was no longer on. If the post-harness state differs from
+    // pre, we surface a single stderr warning (so users can spot
+    // misbehaving harnesses) and persist the post-harness values as
+    // authoritative. Best-effort: a git failure here falls back to the pre
+    // values rather than silently dropping provenance.
+    let post_harness_sha: Option<String> = if pkg.source_type == SourceType::Git {
+        git::current_commit_sha(repo_path).await.ok()
+    } else {
+        None
+    };
+    let post_harness_branch: Option<String> = if pkg.source_type == SourceType::Git {
+        git::current_branch(repo_path).await.ok().flatten()
+    } else {
+        None
+    };
+    let logged_commit_sha = post_harness_sha.clone().or_else(|| pre_harness_sha.clone());
+    let logged_branch = post_harness_branch
+        .clone()
+        .or_else(|| pre_harness_branch.clone());
+    if pre_harness_sha != post_harness_sha || pre_harness_branch != post_harness_branch {
+        let fmt = |sha: &Option<String>, br: &Option<String>| -> String {
+            let s = sha.as_deref().unwrap_or("none");
+            let b = br.as_deref().unwrap_or("none");
+            format!("commit `{}` on branch `{}`", s, b)
+        };
+        eprintln!(
+            "warning: harness `{}` changed HEAD during the run (pre: {}; post: {}); recording post-harness state on the conversation log",
+            harness_name,
+            fmt(&pre_harness_sha, &pre_harness_branch),
+            fmt(&post_harness_sha, &post_harness_branch)
+        );
+    }
+
     // Handle harness execution result. Regardless of success or failure we
     // persist a conversation record so every invocation appears in `kcl history`.
     // `exit_code = None` means the child had no exit status (killed by a signal)
     // or kcl could not obtain one (spawn failure, timeout, interrupted wait).
-    let (response_text, exit_code) = match harness_result {
+    let (mut response_text, mut exit_code) = match harness_result {
         Ok(output) => (output.stdout, output.exit_code),
         Err(e) => {
             eprintln!("error: {}", e);
             (format!("[error] {}", e), None)
         }
     };
+
+    // Guard: a harness that completed "successfully" (exit 0) but produced an
+    // empty or whitespace-only answer is NOT a usable result. Previously this
+    // was recorded as `exit_code=0, response=""` — a successful conversation
+    // that would then be embedded and surfaced as a reusable answer by
+    // `kcl remember`. Demote it to a failure: keep the conversation in the
+    // on-disk log and the history index (so the attempt is still visible) but
+    // record a non-zero exit code so it is never embedded, never treated as a
+    // reusable answer, and the command exits non-zero. An empty answer from a
+    // harness that *did* run to completion is closest to exit code 3.
+    let empty_success = is_empty_success(exit_code, &response_text);
+    if empty_success {
+        eprintln!(
+            "error: harness `{}` exited `0` but produced an empty response; treating as a failed answer (not recorded as reusable)",
+            harness_name
+        );
+        // Make the persisted log self-explanatory rather than a silent "".
+        response_text = "[error] harness exited 0 but produced an empty response".to_string();
+        // Demote so every downstream consumer (log, history row, exit code)
+        // sees a completed-but-failed run.
+        exit_code = Some(3);
+    }
 
     // 6. Save conversation log as JSON file.
     let conv_id = uuid::Uuid::new_v4().to_string();
@@ -332,6 +488,9 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         exit_code,
         response: response_text,
         pull_error,
+        git_commit_sha: logged_commit_sha.clone(),
+        git_branch: logged_branch.clone(),
+        prepare_scope: pkg.prepare_scope.clone(),
     };
 
     // Best-effort: the user has already received the harness response, so a
@@ -345,32 +504,24 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         );
     }
 
-    // 7. Insert conversation index row into SQLite. Reopen the connection now
-    //    that the harness has finished so we don't hold it open across the run.
-    //    Best-effort: the user has already received the harness response, so a
-    //    failure to persist the index row should not fail the command.
+    // 7. Build the conversation row we will (best-effort) persist. The actual
+    //    write is delegated to `record_conversation` below so the main flow
+    //    stays readable.
     let conversation = Conversation {
-        id: conv_id,
+        id: conv_id.clone(),
         package_id: pkg.id.clone(),
         question: question.to_string(),
         harness: harness_name,
         exit_code,
         log_path: relative_log_path,
         created_at: started_at,
+        git_commit_sha: logged_commit_sha,
+        git_branch: logged_branch,
     };
-    match db::open(&db_path) {
-        Ok(conn) => {
-            if let Err(e) = conversation.insert(&conn) {
-                eprintln!("warning: failed to record conversation in history: {:#}", e);
-            }
-        }
-        Err(e) => {
-            eprintln!(
-                "warning: failed to reopen database to record conversation: {:#}",
-                e
-            );
-        }
-    }
+
+    // 7. Best-effort persistence of the conversation into the SQLite index.
+    //    Extracted so the main flow stays linear; all errors are warnings only.
+    record_conversation(&db_path, conversation);
 
     // Exit code semantics:
     //   0 → harness succeeded
@@ -395,12 +546,83 @@ fn write_log_file(pkg_log_dir: &Path, log_path: &Path, log: &ConversationLog) ->
     Ok(())
 }
 
-/// Resolve the branch `kcl ask` should check out for this run.
+/// Best-effort write of the `Conversation` row into the SQLite index used by
+/// `kcl history`.
+///
+/// All failures produce only a warning on stderr; the user's harness answer is
+/// never affected.
+fn record_conversation(db_path: &Path, conversation: Conversation) {
+    // We already ran migrations once at the top of `run` — skip them here so a
+    // single ask doesn't poll `user_version` twice per invocation.
+    match db::open_no_migrate(db_path) {
+        Ok(conn) => {
+            if let Err(e) = conversation.insert(&conn) {
+                eprintln!("warning: failed to record conversation in history: {:#}", e);
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: failed to reopen database to record conversation: {:#}",
+                e
+            );
+        }
+    }
+}
+
+/// What `kcl ask` must do to learn how stale the prepared map is.
+///
+/// Splitting this decision out keeps the SHA-equal hot-path optimization
+/// unit-testable without spawning git.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StalenessPlan<'a> {
+    /// No prepared map, or no recorded/current SHA — staleness is unknown.
+    None,
+    /// Recorded SHA equals current HEAD: the map is definitionally fresh
+    /// (0 commits behind). No git subprocess is spawned.
+    Fresh,
+    /// SHAs differ: git must be asked for the commit count of `base..head`.
+    AskGit { base: &'a str, head: &'a str },
+}
+
+/// Decide how to compute "commits behind" for the prepared map.
+///
+/// Hot path: if the map's recorded commit equals the current HEAD we return
+/// [`StalenessPlan::Fresh`] so the caller can short-circuit to `Some(0)`
+/// *without* spawning `git rev-list`. Only when the SHAs genuinely differ do
+/// we ask git (preserving the previous behavior for that case exactly).
+pub(crate) fn staleness_plan<'a>(
+    recorded_sha: Option<&'a str>,
+    current_sha: Option<&'a str>,
+) -> StalenessPlan<'a> {
+    match (recorded_sha, current_sha) {
+        (Some(rec), Some(cur)) => {
+            if rec == cur {
+                StalenessPlan::Fresh
+            } else {
+                StalenessPlan::AskGit {
+                    base: rec,
+                    head: cur,
+                }
+            }
+        }
+        _ => StalenessPlan::None,
+    }
+}
+
+/// True when the harness ran to completion successfully (exit code `Some(0)`)
+/// yet produced an empty or whitespace-only answer. Such a result must NOT be
+/// recorded as a reusable success (it would otherwise be embedded and surfaced
+/// by `kcl remember`); the caller demotes it to a failed run.
+pub(crate) fn is_empty_success(exit_code: Option<i32>, response: &str) -> bool {
+    matches!(exit_code, Some(0)) && response.trim().is_empty()
+}
+
+/// Resolve the branch `kcl ask` (or `prepare`) should check out for this run.
 ///
 /// CLI `--branch` always wins over the package's pinned `source_branch`. If
 /// neither is set, returns `None` and the package's current HEAD is left
 /// untouched.
-fn resolve_target_branch<'a>(
+pub(crate) fn resolve_target_branch<'a>(
     branch_override: Option<&'a str>,
     pkg_source_branch: Option<&'a str>,
 ) -> Option<&'a str> {
@@ -412,7 +634,7 @@ fn resolve_target_branch<'a>(
 /// Failures are logged to stderr but never propagated — the harness has
 /// already produced its result and the user shouldn't see a successful
 /// answer turn into a failed exit code just because git was unhappy.
-async fn restore_head(repo_path: &Path, head: &HeadState) {
+pub(crate) async fn restore_head(repo_path: &Path, head: &HeadState) {
     let target_desc = match head {
         HeadState::Branch(name) => format!("branch `{}`", name),
         HeadState::Detached(sha) => format!("detached at `{}`", &sha[..sha.len().min(8)]),
@@ -450,6 +672,9 @@ mod tests {
             exit_code: Some(0),
             response: "Routing in axum uses...".to_string(),
             pull_error: None,
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -478,6 +703,9 @@ mod tests {
             exit_code: None,
             response: "output".to_string(),
             pull_error: None,
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -499,6 +727,8 @@ mod tests {
             "/tmp/test-ctx".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
 
@@ -510,6 +740,8 @@ mod tests {
                 "claude".to_string(),
                 Some(0),
                 format!("/tmp/logs/conv{}.json", i),
+                None,
+                None,
             );
             conv.insert(&conn).unwrap();
         }
@@ -537,6 +769,9 @@ mod tests {
             exit_code: None,
             response: "[error] harness timed out after 120s".to_string(),
             pull_error: None,
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -560,6 +795,8 @@ mod tests {
             "/tmp/fail-pkg".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
 
@@ -569,6 +806,8 @@ mod tests {
             "claude".to_string(),
             None,
             "/tmp/logs/fail.json".to_string(),
+            None,
+            None,
         );
         conv.insert(&conn).unwrap();
 
@@ -593,6 +832,9 @@ mod tests {
             exit_code: Some(0),
             response: "Routing in axum uses...".to_string(),
             pull_error: Some("pull failed for axum: remote unreachable".to_string()),
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -625,6 +867,9 @@ mod tests {
             exit_code: Some(0),
             response: "ok".to_string(),
             pull_error: None,
+            git_commit_sha: None,
+            git_branch: None,
+            prepare_scope: "global".to_string(),
         };
 
         let json = serde_json::to_string_pretty(&log).unwrap();
@@ -644,6 +889,8 @@ mod tests {
             "/tmp/hono".to_string(),
             true,
             None,
+            false,
+            "global".to_string(),
         );
 
         // No CLI override: fall back to the package's pinned branch.
@@ -677,10 +924,60 @@ mod tests {
             "/tmp/empty-pkg".to_string(),
             false,
             None,
+            false,
+            "global".to_string(),
         );
         pkg.insert(&conn).unwrap();
 
         let questions = Conversation::recent_questions(&conn, &pkg.id, 5).unwrap();
         assert!(questions.is_empty());
+    }
+
+    #[test]
+    fn staleness_plan_sha_equal_is_fresh_and_skips_git() {
+        // Hot path: identical SHAs => Fresh, no AskGit (no subprocess).
+        assert_eq!(
+            staleness_plan(Some("abc123"), Some("abc123")),
+            StalenessPlan::Fresh
+        );
+    }
+
+    #[test]
+    fn staleness_plan_sha_differs_asks_git() {
+        assert_eq!(
+            staleness_plan(Some("aaaa"), Some("bbbb")),
+            StalenessPlan::AskGit {
+                base: "aaaa",
+                head: "bbbb"
+            }
+        );
+    }
+
+    #[test]
+    fn staleness_plan_none_when_sha_missing() {
+        assert_eq!(staleness_plan(None, Some("bbbb")), StalenessPlan::None);
+        assert_eq!(staleness_plan(Some("aaaa"), None), StalenessPlan::None);
+        assert_eq!(staleness_plan(None, None), StalenessPlan::None);
+    }
+
+    #[test]
+    fn empty_success_guard_flags_blank_zero_exit() {
+        // Exit 0 + empty/whitespace => must be treated as failure.
+        assert!(is_empty_success(Some(0), ""));
+        assert!(is_empty_success(Some(0), "   \n\t  "));
+    }
+
+    #[test]
+    fn empty_success_guard_allows_real_answer() {
+        assert!(!is_empty_success(Some(0), "Routing lives in src/router.rs"));
+    }
+
+    #[test]
+    fn empty_success_guard_ignores_non_zero_and_signal() {
+        // Non-zero / signal exits are handled by the existing exit-code
+        // mapping; the empty-success guard must not also fire for them.
+        assert!(!is_empty_success(Some(3), ""));
+        assert!(!is_empty_success(Some(1), "   "));
+        assert!(!is_empty_success(None, ""));
     }
 }

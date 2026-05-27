@@ -187,6 +187,7 @@ fn apply_set(path: &Path, key: &str, value: &str) -> Result<()> {
                     prompt_mode: crate::config::PromptMode::Arg,
                     model_args: Vec::new(),
                     default_model: None,
+                    prepared_args: vec![],
                 });
 
             match property {
@@ -425,6 +426,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
                 default_model: Some("claude-sonnet-4-6".to_string()),
+                prepared_args: vec![],
             },
         );
         config.harnesses.insert(
@@ -435,6 +437,7 @@ mod tests {
                 prompt_mode: PromptMode::Stdin,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
 
@@ -468,6 +471,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
         config.save(&path).unwrap();
@@ -498,6 +502,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
         config.harnesses.insert(
@@ -508,6 +513,7 @@ mod tests {
                 prompt_mode: PromptMode::Arg,
                 model_args: vec![],
                 default_model: None,
+                prepared_args: vec![],
             },
         );
         config.save(&path).unwrap();
