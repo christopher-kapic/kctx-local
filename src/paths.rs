@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -60,6 +61,27 @@ pub fn log_dir() -> Result<PathBuf> {
     Ok(state_dir()?.join("logs"))
 }
 
+/// Returns a filesystem-safe directory name for a package identifier.
+///
+/// Identifiers are user-facing and may contain `/` for scoped or path-like
+/// names, but on-disk clone/log directories must not treat those as hierarchy.
+/// Percent-encode every byte outside `[A-Za-z0-9._-]` to keep the mapping
+/// stable and collision-free for the currently allowed ASCII identifier set
+/// (`%` itself is rejected by `validate_identifier`, so the encoding is
+/// unambiguous).
+pub fn package_storage_name(identifier: &str) -> String {
+    let mut out = String::with_capacity(identifier.len());
+    for byte in identifier.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            out.push(char::from(byte));
+        } else {
+            // write! into a String is infallible.
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
 /// Returns the path to the config file.
 pub fn config_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.json"))
@@ -109,5 +131,14 @@ mod tests {
     fn db_file_is_sqlite() {
         let path = db_file().unwrap();
         assert_eq!(path.file_name().unwrap(), "kcl.db");
+    }
+
+    #[test]
+    fn package_storage_name_percent_encodes_path_like_identifiers() {
+        assert_eq!(
+            package_storage_name("@tanstack/example"),
+            "%40tanstack%2Fexample"
+        );
+        assert_eq!(package_storage_name("a/b/c"), "a%2Fb%2Fc");
     }
 }

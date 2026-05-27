@@ -40,7 +40,7 @@ src/
 - **XDG paths on every platform** (including macOS — we deliberately do *not* use `~/Library/Application Support`). See `src/dirs.rs` for the resolution logic. `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` / `$XDG_STATE_HOME` override the defaults below.
 - **JSON config** at `~/.config/kcl/config.json`
 - **SQLite database** at `~/.local/share/kcl/kcl.db`
-- **Conversation logs** as JSON files at `~/.local/state/kcl/logs/<package>/<timestamp>-<id>.json`
+- **Conversation logs** as JSON files at `~/.local/state/kcl/logs/<package>/<timestamp>-<id>.json`. Identifiers that contain characters other than `[A-Za-z0-9._-]` (e.g. scoped names like `@tanstack/example`) are percent-encoded for the on-disk directory — `@tanstack/example` becomes `%40tanstack%2Fexample`. See `paths::package_storage_name`.
 - **Conversation index** in SQLite for fast listing/filtering; full logs on disk
 - **Shell out to `git`** rather than libgit2 — simpler, respects user's git config/SSH
 - **Exit codes:** 0 = success, 1 = kcl error, 2 = harness terminated without a normal exit status (signal-killed, spawn failure, timeout), 3 = harness ran to completion but exited non-zero

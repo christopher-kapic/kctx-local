@@ -113,14 +113,30 @@ fn validate_identifier(id: &str) -> Result<()> {
     if id.is_empty() {
         bail!("Package identifier must not be empty");
     }
-    if !id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if !id.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/' || c == '@'
+    }) {
         bail!(
             "Package identifier `{id}` contains invalid characters. \
-             Only ASCII letters, digits, hyphens, and underscores are allowed."
+             Only ASCII letters, digits, and the characters `-`, `_`, `.`, `/`, `@` are allowed."
         );
+    }
+    // The identifier is used as a filesystem subdirectory name under the
+    // clone and log directories, so reject anything that could escape those
+    // roots even though SQLite itself would accept it.
+    if id.starts_with('/') {
+        bail!("Package identifier `{id}` must not start with `/`.");
+    }
+    if id.ends_with('/') {
+        bail!("Package identifier `{id}` must not end with `/`.");
+    }
+    for component in id.split('/') {
+        if component.is_empty() {
+            bail!("Package identifier `{id}` must not contain empty path segments (`//`).");
+        }
+        if component == "." || component == ".." {
+            bail!("Package identifier `{id}` must not contain `.` or `..` path segments.");
+        }
     }
     Ok(())
 }
@@ -242,7 +258,7 @@ async fn cmd_add(
             // instead of hard-coding "main".
             let config = Config::load_or_default()?;
             let clone_dir = expand_tilde(&config.clone_dir)?;
-            let pkg_dir = clone_dir.join(identifier);
+            let pkg_dir = clone_dir.join(paths::package_storage_name(identifier));
 
             if pkg_dir.exists() {
                 bail!(
@@ -439,7 +455,7 @@ fn cmd_remove(identifier: &str) -> Result<()> {
 
             // Remove conversation log directory for this package.
             let log_dir = paths::log_dir()?;
-            let pkg_log_dir = log_dir.join(identifier);
+            let pkg_log_dir = log_dir.join(paths::package_storage_name(identifier));
             if pkg_log_dir.is_dir() {
                 std::fs::remove_dir_all(&pkg_log_dir)?;
                 eprintln!("deleted logs {}", pkg_log_dir.display());
@@ -977,14 +993,13 @@ mod tests {
 
     #[test]
     fn validate_identifier_rejects_traversal() {
+        // `..` as a path segment must be rejected even though `.` and `/`
+        // are now allowed individually.
         let result = validate_identifier("../../etc/cron.d");
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("invalid characters")
-        );
+        assert!(validate_identifier("foo/../bar").is_err());
+        assert!(validate_identifier("..").is_err());
+        assert!(validate_identifier(".").is_err());
     }
 
     #[test]
@@ -1005,12 +1020,34 @@ mod tests {
         assert!(validate_identifier("my_package").is_ok());
         assert!(validate_identifier("pkg123").is_ok());
         assert!(validate_identifier("A").is_ok());
+        assert!(validate_identifier("@tanstack/example").is_ok());
+        assert!(validate_identifier("github.com/user/repo").is_ok());
+        assert!(validate_identifier("my.package").is_ok());
+        assert!(validate_identifier("a/b/c").is_ok());
+        assert!(validate_identifier("v1.2.3").is_ok());
     }
 
     #[test]
-    fn validate_identifier_rejects_slashes() {
-        assert!(validate_identifier("foo/bar").is_err());
+    fn package_storage_name_avoids_identifier_hierarchy() {
+        let parent = paths::package_storage_name("@tanstack/example");
+        let child = paths::package_storage_name("@tanstack/example/docs");
+
+        assert!(!parent.contains('/'));
+        assert!(!child.contains('/'));
+        assert_ne!(parent, child);
+        assert!(!std::path::Path::new(&child).starts_with(std::path::Path::new(&parent)));
+    }
+
+    #[test]
+    fn validate_identifier_rejects_backslashes() {
         assert!(validate_identifier("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_leading_or_trailing_slash() {
+        assert!(validate_identifier("/foo").is_err());
+        assert!(validate_identifier("foo/").is_err());
+        assert!(validate_identifier("foo//bar").is_err());
     }
 
     #[test]

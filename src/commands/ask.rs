@@ -465,10 +465,11 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
     let short_id = &conv_id[..8];
     let timestamp = started_at.format("%Y%m%d-%H%M%S");
     let log_filename = format!("{}-{}.json", timestamp, short_id);
-    let relative_log_path = format!("{}/{}", pkg.identifier, log_filename);
+    let package_log_dir_name = paths::package_storage_name(&pkg.identifier);
+    let relative_log_path = format!("{}/{}", package_log_dir_name, log_filename);
 
     let log_dir = paths::log_dir()?;
-    let pkg_log_dir = log_dir.join(&pkg.identifier);
+    let pkg_log_dir = log_dir.join(&package_log_dir_name);
 
     // Only record the model in the log if the harness actually accepted it.
     // (model_args being non-empty is the signal that the model was forwarded.)
