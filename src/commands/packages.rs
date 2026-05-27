@@ -1328,6 +1328,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
 
@@ -1363,6 +1364,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
 

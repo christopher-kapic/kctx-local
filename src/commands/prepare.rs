@@ -403,6 +403,28 @@ async fn run_after_prepare_checkout(args: RunAfterPrepareCheckout<'_>) -> Result
                         pkg.identifier, prepare_scope_at_time, branch_for_log
                     );
                 }
+
+                // Seed the outline index. The orientation map is the primary
+                // deliverable, so failures here are warnings — they must not
+                // mask a successful prepare with an error exit code.
+                let root =
+                    std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+                match crate::explore_index::index_target(
+                    &mut conn2,
+                    Some(pkg.id.as_str()),
+                    &root,
+                    |_p| {},
+                ) {
+                    Ok(stats) => {
+                        eprintln!(
+                            "indexed {} files ({} symbols, {} identifiers)",
+                            stats.files_indexed, stats.symbols, stats.identifiers
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("warning: outline index build failed: {:#}", e);
+                    }
+                }
             }
             Err(e) => {
                 eprintln!(
@@ -516,6 +538,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         }
     }
 

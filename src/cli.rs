@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -134,6 +136,275 @@ pub enum Command {
         /// Skip prompts, use auto-detected defaults
         #[arg(long)]
         non_interactive: bool,
+    },
+
+    /// Codebase-navigation toolkit invoked by the harness that `kcl ask`
+    /// spawns. Hidden from the top-level `kcl --help` so it does not pollute
+    /// the main agent's context; `kcl explore --help` lists the full toolbox.
+    #[command(
+        hide = true,
+        alias = "x",
+        long_about = "Codebase-navigation primitives intended for the harness invoked by `kcl ask`.\n\nEvery command operates on the package in the current working directory unless\n`--package <id>` is given. Add `--json` for structured output and `--max-bytes`\nto cap response size."
+    )]
+    Explore {
+        #[command(subcommand)]
+        command: ExploreCommand,
+    },
+}
+
+/// Subcommands of `kcl explore`.
+///
+/// Common flags accepted by every variant:
+/// - `--package <id>` optional override; otherwise the package containing
+///   `$PWD` is detected (falling back to `$PWD` itself).
+/// - `--json` structured output.
+/// - `--max-bytes <n>` truncate output at N bytes (default 16384).
+#[derive(Subcommand)]
+pub enum ExploreCommand {
+    /// Annotated directory tree (no file contents).
+    Tree {
+        /// Subdirectory to walk (defaults to the package root).
+        path: Option<PathBuf>,
+
+        /// Maximum walk depth (uncapped by default).
+        #[arg(long)]
+        depth: Option<usize>,
+
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
+    },
+
+    /// Symbol outline (functions, types, imports) for a file.
+    Outline {
+        /// File to outline.
+        file: PathBuf,
+
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
+    },
+
+    /// Find definition sites of a symbol across the package.
+    Symbol {
+        /// Symbol name to look up.
+        name: String,
+
+        /// Match `name` as a prefix.
+        #[arg(long)]
+        prefix: bool,
+
+        /// Filter by symbol kind (e.g. `function`, `method`, `struct`, `class`,
+        /// `interface`, `type`, `const`, `enum`, `trait`, `module`).
+        #[arg(long)]
+        kind: Option<String>,
+
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
+    },
+
+    /// Content search (regex) via ripgrep, budget-capped.
+    Search {
+        /// Pattern to search for (regex).
+        pattern: String,
+
+        /// Restrict by ripgrep file-type alias (passed to `rg --type`).
+        #[arg(long = "type", value_name = "TYPE")]
+        type_filter: Option<String>,
+
+        /// Restrict by path glob (passed to `rg --glob`).
+        #[arg(long = "glob", value_name = "GLOB")]
+        path_glob: Option<String>,
+
+        /// Lines of context before and after each match.
+        #[arg(long, default_value = "2")]
+        context: usize,
+
+        /// Case-insensitive search (passed to `rg --ignore-case`).
+        #[arg(long, short = 'i')]
+        case_insensitive: bool,
+
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
+    },
+
+    /// Exact-identifier inverted index lookup.
+    Word {
+        /// Token to look up.
+        token: String,
+
+        /// Case-insensitive match.
+        #[arg(long, short = 'i')]
+        ignore_case: bool,
+
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
+    },
+
+    /// Read a line range from a file, with a content hash.
+    Read {
+        /// File to read.
+        file: PathBuf,
+
+        /// First line to include (1-indexed, default 1).
+        #[arg(long)]
+        start: Option<usize>,
+
+        /// Last line to include (1-indexed, default last).
+        #[arg(long)]
+        end: Option<usize>,
+
+        /// Omit line-number prefixes.
+        #[arg(long)]
+        no_line_numbers: bool,
+
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
+    },
+
+    /// File-level import graph (forward + reverse).
+    Deps {
+        /// File to look up.
+        file: PathBuf,
+
+        /// Number of hops to traverse.
+        #[arg(long)]
+        hops: Option<usize>,
+
+        /// Direction to walk: `forward`, `reverse`, or `both`.
+        #[arg(long)]
+        direction: Option<String>,
+
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
+    },
+
+    /// Symbol-level blast radius.
+    ///
+    /// Matches are name-based: when several symbols share the same name,
+    /// callsite results may include unrelated references. Use `--file` to
+    /// scope callers to a specific file or directory when disambiguating.
+    Impact {
+        /// Symbol name.
+        symbol: String,
+
+        /// Number of hops to traverse.
+        #[arg(long)]
+        hops: Option<usize>,
+
+        /// Restrict callsite matches to a specific file or directory
+        /// (path relative to the package root). When set, references whose
+        /// `caller_file` is not equal to nor a descendant of this path are
+        /// dropped. Useful when a symbol name is ambiguous.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
+    },
+
+    /// Most-recently-modified files.
+    Hot {
+        /// Maximum number of entries.
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
+    },
+
+    /// Circular dependency detection.
+    Circular {
+        /// Optional package id override.
+        #[arg(long)]
+        package: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Truncate output at N bytes.
+        #[arg(long, default_value = "16384")]
+        max_bytes: usize,
     },
 }
 

@@ -12,12 +12,24 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 clap = { version = "4", features = ["derive", "wrap_help"] }
 clap_complete = "4"
 dirs = "6"
+ignore = "0.4"
 libc = "0.2"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-shlex = "1"
+sha2 = "0.11"
+shlex = "2"
+streaming-iterator = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "signal", "sync"] }
+tree-sitter = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
 uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
 which = "8"

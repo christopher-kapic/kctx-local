@@ -357,6 +357,7 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         prepared_context.as_ref(),
         current_head_sha.as_deref(),
         commits_behind,
+        harness_config.inject_explore_toolkit,
     );
 
     // Release the DB connection before the long-running harness invocation so

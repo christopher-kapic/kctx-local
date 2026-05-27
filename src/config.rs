@@ -25,7 +25,7 @@ pub struct Config {
 }
 
 /// A harness definition — an external coding agent invoked as a subprocess.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HarnessConfig {
     /// Executable name or path.
     pub command: String,
@@ -69,6 +69,32 @@ pub struct HarnessConfig {
     /// resolved) is applied here so combined-form args keep working.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prepared_args: Vec<String>,
+
+    /// Whether to append the inline `kcl explore` toolkit summary to the
+    /// prompt for this harness. Defaults to `true` so the harness sees the
+    /// navigation primitives without any config change; can be set to `false`
+    /// for harnesses where the extra block is noise (very small context
+    /// windows, harnesses that already get the info another way).
+    #[serde(default = "default_true")]
+    pub inject_explore_toolkit: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            prompt_mode: PromptMode::Arg,
+            model_args: Vec::new(),
+            default_model: None,
+            prepared_args: Vec::new(),
+            inject_explore_toolkit: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -302,6 +328,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
 
@@ -377,6 +404,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
         validate_harness_configured(&config, "my-custom").unwrap();
@@ -394,6 +422,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
         let err = validate_harness_configured(&config, "nonexistent").unwrap_err();
@@ -469,6 +498,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
 
@@ -537,6 +567,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec!["--max-turns".to_string(), "8".to_string()],
+                inject_explore_toolkit: true,
             },
         );
         let json = serde_json::to_string_pretty(&config).unwrap();
@@ -558,6 +589,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
         let json = serde_json::to_string(&config).unwrap();

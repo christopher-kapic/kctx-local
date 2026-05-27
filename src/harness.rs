@@ -53,11 +53,51 @@ impl MapFreshness {
     }
 }
 
+/// Inline summary of the `kcl explore` toolkit, appended to the harness prompt
+/// when `inject_toolkit` is true. Kept compact because it goes into every
+/// `kcl ask` invocation, but grouped by intent so the agent reaches for the
+/// right primitive instead of falling back to raw `grep`/`cat`/`find`.
+///
+/// Every command operates on the package in the current working directory by
+/// default. Common flags on every command: `--json` (structured output),
+/// `--max-bytes N` (cap response size), `--help` (full flag list).
+const EXPLORE_TOOLKIT_BLOCK: &str = concat!(
+    "\n--- BEGIN EXPLORATION TOOLKIT ---\n",
+    "The `kcl explore` CLI is available on this machine and operates on the package in the current working directory. Prefer it over raw `grep`/`cat`/`find` whenever a primitive below fits — the index-backed commands return precise, structured answers far more cheaply than full-file reads.\n",
+    "\n",
+    "Common flags on every command: `--json` for structured output, `--max-bytes N` to cap response size, `--help` for full details.\n",
+    "\n",
+    "Orientation:\n",
+    "- `kcl explore tree [path]` — annotated directory listing with per-file symbol counts (no content)\n",
+    "- `kcl explore outline <file>` — symbols, parents, and imports for one file (use this instead of reading whole files to discover structure)\n",
+    "- `kcl explore hot [--limit N]` — most-recently-modified files\n",
+    "\n",
+    "Definition / reference lookup:\n",
+    "- `kcl explore symbol <name> [--prefix] [--kind K]` — definition sites for a symbol (kinds: function, method, struct, enum, trait, class, interface, type, const, module)\n",
+    "- `kcl explore word <token> [-i]` — exact-identifier inverted index lookup (every line containing this token)\n",
+    "- `kcl explore search <pattern> [--type T] [--glob G] [--context N] [-i]` — regex content search via ripgrep, budget-capped\n",
+    "\n",
+    "Targeted reading:\n",
+    "- `kcl explore read <file> [--start N] [--end M]` — read a line range with a content hash header (use after `outline` to pull just the function body you need)\n",
+    "\n",
+    "Blast-radius / structure analysis:\n",
+    "- `kcl explore deps <file> [--direction forward|reverse|both] [--hops N]` — file-level import graph\n",
+    "- `kcl explore impact <symbol> [--hops N] [--file PATH]` — symbol-level callsites across the codebase; `--file` scopes callers when a name is ambiguous\n",
+    "- `kcl explore circular` — detect import cycles\n",
+    "\n",
+    "Suggested flow: start with `outline`/`tree` to orient, use `symbol`/`word`/`search` to locate, then `read` line ranges for the parts you actually need. Reach for `deps`/`impact` when assessing change risk.\n",
+    "--- END EXPLORATION TOOLKIT ---\n",
+);
+
 /// Build the prompt string sent to the harness.
 ///
 /// The prepared-map block is injected near the top so the agent sees the
 /// high-signal orientation hints first. Delimiters are chosen to be obvious
 /// to both humans and LLM agents.
+///
+/// When `inject_toolkit` is true, an inline summary of the `kcl explore`
+/// toolbox is appended after the prepared map (if any) and before the closing
+/// instruction so the harness sees the navigation primitives it has access to.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prompt(
     display_name: &str,
@@ -67,6 +107,7 @@ pub fn build_prompt(
     prepared: Option<&PreparedContext>,
     current_commit_sha: Option<&str>,
     commits_behind: Option<usize>,
+    inject_toolkit: bool,
 ) -> String {
     let mut prompt = format!(
         concat!(
@@ -137,6 +178,13 @@ pub fn build_prompt(
             prompt.push_str(&format!("- {}\n", q));
         }
         prompt.push('\n');
+    }
+
+    // 3. Optional exploration toolkit summary. Placed after the prepared map
+    //    (and any recent-questions block) but before the closing instruction
+    //    so the agent sees the navigation primitives it has available.
+    if inject_toolkit {
+        prompt.push_str(EXPLORE_TOOLKIT_BLOCK);
     }
 
     // Closing instruction. When no prepared map is present, keep the original
@@ -511,6 +559,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert!(prompt.contains("Axum (axum)"));
@@ -521,6 +570,8 @@ mod tests {
         assert!(!prompt.contains("Recent questions"));
         // No prepared block when absent
         assert!(!prompt.contains("PREPARED ORIENTATION MAP"));
+        // No toolkit when injection is off.
+        assert!(!prompt.contains("BEGIN EXPLORATION TOOLKIT"));
     }
 
     #[test]
@@ -537,6 +588,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert!(prompt.contains("Axum (axum)"));
@@ -557,10 +609,72 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         // Empty context list should not produce the context block
         assert!(!prompt.contains("Recent questions"));
+    }
+
+    #[test]
+    fn prompt_injects_toolkit_when_flag_is_true() {
+        let prompt = build_prompt(
+            "Axum",
+            "axum",
+            "How does routing work?",
+            None,
+            None,
+            None,
+            None,
+            true,
+        );
+        assert!(prompt.contains("--- BEGIN EXPLORATION TOOLKIT ---"));
+        assert!(prompt.contains("--- END EXPLORATION TOOLKIT ---"));
+        // All ten commands appear, identified by the leading backticked name.
+        for c in [
+            "`kcl explore tree",
+            "`kcl explore outline",
+            "`kcl explore symbol",
+            "`kcl explore word",
+            "`kcl explore search",
+            "`kcl explore read",
+            "`kcl explore deps",
+            "`kcl explore impact",
+            "`kcl explore hot",
+            "`kcl explore circular",
+        ] {
+            assert!(prompt.contains(c), "toolkit missing `{}`", c);
+        }
+        // High-value flags surfaced so the agent doesn't have to discover
+        // them via `--help` on every call.
+        assert!(prompt.contains("--prefix"));
+        assert!(prompt.contains("--kind"));
+        assert!(prompt.contains("--hops"));
+        assert!(prompt.contains("--direction"));
+        assert!(prompt.contains("--start"));
+        assert!(prompt.contains("--file"));
+        // Intent grouping headers.
+        assert!(prompt.contains("Orientation:"));
+        assert!(prompt.contains("Definition / reference lookup:"));
+        assert!(prompt.contains("Blast-radius / structure analysis:"));
+        // The toolkit block sits before the closing instruction.
+        let toolkit_idx = prompt
+            .find("BEGIN EXPLORATION TOOLKIT")
+            .expect("toolkit must be present");
+        let closing_idx = prompt
+            .find("Explore the codebase and answer precisely")
+            .expect("closing must be present");
+        assert!(
+            toolkit_idx < closing_idx,
+            "toolkit must come before the closing instruction"
+        );
+    }
+
+    #[test]
+    fn prompt_omits_toolkit_when_flag_is_false() {
+        let prompt = build_prompt("Axum", "axum", "q", None, None, None, None, false);
+        assert!(!prompt.contains("BEGIN EXPLORATION TOOLKIT"));
+        assert!(!prompt.contains("kcl explore tree"));
     }
 
     #[test]
@@ -576,6 +690,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let args = build_args(&harness, "test prompt", None, false);
@@ -594,6 +709,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let args = build_args(&harness, "my question", None, false);
@@ -609,6 +725,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let args = build_args(&harness, "test prompt", None, false);
@@ -626,6 +743,7 @@ mod tests {
             model_args: vec!["--model".to_string(), "{model}".to_string()],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let args = build_args(&harness, "the question", Some("claude-sonnet-4.6"), false);
@@ -644,6 +762,7 @@ mod tests {
             model_args: vec![], // empty: harness has no model flag
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let args = build_args(&harness, "q", Some("some-model"), false);
@@ -659,6 +778,7 @@ mod tests {
             model_args: vec!["--model".to_string(), "{model}".to_string()],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let args = build_args(&harness, "q", None, false);
@@ -674,6 +794,7 @@ mod tests {
             model_args: vec!["--model={model}".to_string()],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let args = build_args(&harness, "q", Some("gpt-4"), false);
@@ -689,6 +810,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec!["--max-turns".to_string(), "8".to_string()],
+            inject_explore_toolkit: true,
         };
 
         // No map: prepared_args are NOT appended (byte-for-byte unchanged).
@@ -708,7 +830,8 @@ mod tests {
             prompt_mode: PromptMode::Arg,
             model_args: vec![],
             default_model: None,
-            prepared_args: vec![], // none configured
+            prepared_args: vec![],
+            inject_explore_toolkit: true, // none configured
         };
 
         let with_map = build_args(&harness, "q", None, true);
@@ -729,6 +852,7 @@ mod tests {
                 "--ceiling-for={model}".to_string(),
                 "--echo={prompt}".to_string(),
             ],
+            inject_explore_toolkit: true,
         };
 
         let args = build_args(&harness, "the q", Some("opus"), true);
@@ -754,6 +878,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec!["--keep={prompt}".to_string(), "--m={model}".to_string()],
+            inject_explore_toolkit: true,
         };
 
         let args = build_args(&harness, "secret prompt", Some("haiku"), true);
@@ -769,6 +894,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let cwd = std::env::temp_dir();
@@ -789,6 +915,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let cwd = std::env::temp_dir();
@@ -808,6 +935,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let cwd = std::env::temp_dir();
@@ -829,6 +957,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let cwd = std::env::temp_dir();
@@ -849,6 +978,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let cwd = std::env::temp_dir();
@@ -869,6 +999,7 @@ mod tests {
             model_args: vec![],
             default_model: None,
             prepared_args: vec![],
+            inject_explore_toolkit: true,
         };
 
         let cwd = std::env::temp_dir();
@@ -902,6 +1033,7 @@ mod tests {
             Some(&p),
             Some("abc123def456"),
             Some(0),
+            false,
         );
 
         assert!(prompt.contains("--- BEGIN PREPARED ORIENTATION MAP ---"));
@@ -943,7 +1075,7 @@ mod tests {
 
     #[test]
     fn prompt_closing_unconditional_when_no_map() {
-        let prompt = build_prompt("Axum", "axum", "q", None, None, None, None);
+        let prompt = build_prompt("Axum", "axum", "q", None, None, None, None, false);
         assert!(
             prompt.contains("Explore the codebase and answer precisely. Reference file paths.")
         );
@@ -953,7 +1085,16 @@ mod tests {
     #[test]
     fn prompt_closing_slightly_stale_verifies_affected_files() {
         let p = sample_prepared();
-        let prompt = build_prompt("Axum", "axum", "q", None, Some(&p), Some("def456"), Some(3));
+        let prompt = build_prompt(
+            "Axum",
+            "axum",
+            "q",
+            None,
+            Some(&p),
+            Some("def456"),
+            Some(3),
+            false,
+        );
         assert!(prompt.contains("a few commits behind"));
         assert!(prompt.contains("verify only the specific files plausibly affected"));
         assert!(prompt.contains("Do NOT perform a broad tree scan"));
@@ -966,7 +1107,16 @@ mod tests {
     #[test]
     fn prompt_closing_unknown_staleness_falls_back_to_cautious() {
         let p = sample_prepared();
-        let prompt = build_prompt("Axum", "axum", "q", None, Some(&p), Some("def456"), None);
+        let prompt = build_prompt(
+            "Axum",
+            "axum",
+            "q",
+            None,
+            Some(&p),
+            Some("def456"),
+            None,
+            false,
+        );
         assert!(prompt.contains("may be stale"));
         assert!(prompt.contains("explore the codebase to verify and answer precisely"));
         assert!(!prompt.contains("Do NOT perform a broad tree scan"));
@@ -986,6 +1136,7 @@ mod tests {
             Some(&p),
             Some("def456"),
             Some(99),
+            false,
         );
         assert!(prompt.contains("may be stale"));
         assert!(!prompt.contains("Do NOT perform a broad tree scan"));

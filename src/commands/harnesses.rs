@@ -114,6 +114,7 @@ mod tests {
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
                 default_model: Some("claude-sonnet-4-6".to_string()),
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
         harnesses.insert(
@@ -125,6 +126,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
         Config {

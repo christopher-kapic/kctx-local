@@ -212,6 +212,135 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    if version < 5 {
+        // Tree-sitter–backed outline index. Keyed primarily by `root_path`
+        // (canonical absolute path of the explore target) rather than
+        // `package_id`, so loose targets (no registered package) and renamed
+        // packages don't collide. `package_id` on `outline_files` is purely
+        // informational — empty string when no registered package matches.
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS outline_files (
+                package_id    TEXT NOT NULL,
+                root_path     TEXT NOT NULL,
+                file_path     TEXT NOT NULL,
+                language      TEXT NOT NULL,
+                mtime_ns      INTEGER NOT NULL,
+                size_bytes    INTEGER NOT NULL,
+                content_hash  TEXT NOT NULL,
+                indexed_at    TEXT NOT NULL,
+                PRIMARY KEY (root_path, file_path)
+            );
+
+            CREATE TABLE IF NOT EXISTS outline_symbols (
+                root_path     TEXT NOT NULL,
+                file_path     TEXT NOT NULL,
+                name          TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                line          INTEGER NOT NULL,
+                end_line      INTEGER,
+                parent        TEXT,
+                visibility    TEXT,
+                signature     TEXT,
+                FOREIGN KEY (root_path, file_path)
+                    REFERENCES outline_files(root_path, file_path) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_symbols_name
+                ON outline_symbols(name);
+            CREATE INDEX IF NOT EXISTS idx_symbols_root_file
+                ON outline_symbols(root_path, file_path);
+
+            CREATE TABLE IF NOT EXISTS outline_imports (
+                root_path     TEXT NOT NULL,
+                file_path     TEXT NOT NULL,
+                target        TEXT NOT NULL,
+                line          INTEGER NOT NULL,
+                FOREIGN KEY (root_path, file_path)
+                    REFERENCES outline_files(root_path, file_path) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_imports_root_file
+                ON outline_imports(root_path, file_path);
+
+            CREATE TABLE IF NOT EXISTS outline_identifiers (
+                root_path     TEXT NOT NULL,
+                file_path     TEXT NOT NULL,
+                token         TEXT NOT NULL,
+                line          INTEGER NOT NULL,
+                FOREIGN KEY (root_path, file_path)
+                    REFERENCES outline_files(root_path, file_path) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_identifiers_token
+                ON outline_identifiers(token);
+            CREATE INDEX IF NOT EXISTS idx_identifiers_root_file
+                ON outline_identifiers(root_path, file_path);
+
+            PRAGMA user_version = 5;
+            ",
+        )?;
+    }
+
+    if version < 6 {
+        // Resolved file-to-file dependency edges. Populated incrementally by
+        // index_file after raw imports are written. A NULL importee_file means
+        // the import couldn't be resolved (external crate, stdlib, broken
+        // path) — we still record it so the agent can see unresolved deps
+        // without re-parsing.
+        //
+        // Files already indexed under <=v5 did not populate outline_deps;
+        // wipe outline_files for any pre-existing root so a fresh index
+        // pass populates the new table. (FK cascade clears children.)
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS outline_deps (
+                root_path       TEXT NOT NULL,
+                importer_file   TEXT NOT NULL,
+                importee_file   TEXT,
+                raw_target      TEXT NOT NULL,
+                line            INTEGER NOT NULL,
+                FOREIGN KEY (root_path, importer_file)
+                    REFERENCES outline_files(root_path, file_path) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_deps_importer
+                ON outline_deps(root_path, importer_file);
+            CREATE INDEX IF NOT EXISTS idx_deps_importee
+                ON outline_deps(root_path, importee_file);
+
+            DELETE FROM outline_files;
+
+            PRAGMA user_version = 6;
+            ",
+        )?;
+    }
+
+    if version < 7 {
+        // Callsite extraction: every call_expression / type_identifier /
+        // macro_invocation captured per file, mapped to its enclosing
+        // function/method when known. The `impact` command queries this
+        // table for symbol blast-radius lookups. Noisy by design — same-name
+        // collisions across files are surfaced as candidate sites for the
+        // agent / user to disambiguate.
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS outline_callsites (
+                root_path       TEXT NOT NULL,
+                caller_file     TEXT NOT NULL,
+                caller_line     INTEGER NOT NULL,
+                caller_symbol   TEXT,
+                callee_name     TEXT NOT NULL,
+                callee_kind     TEXT NOT NULL,
+                FOREIGN KEY (root_path, caller_file)
+                    REFERENCES outline_files(root_path, file_path) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_callsites_callee
+                ON outline_callsites(callee_name);
+            CREATE INDEX IF NOT EXISTS idx_callsites_caller
+                ON outline_callsites(root_path, caller_file);
+
+            PRAGMA user_version = 7;
+            ",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -292,15 +421,50 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_4_after_migrations() {
+    fn user_version_is_7_after_migrations() {
         let conn = open_memory().unwrap();
         let v: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(
-            v, 4,
-            "expected user_version=4 after memory+prepare+shallow+provenance migrations"
+            v, 7,
+            "expected user_version=7 after outline+deps+callsites migrations"
         );
+    }
+
+    #[test]
+    fn outline_index_tables_exist_after_v5() {
+        let conn = open_memory().unwrap();
+        for table in [
+            "outline_files",
+            "outline_symbols",
+            "outline_imports",
+            "outline_identifiers",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "table `{}` must exist after v5 migration", table);
+        }
+    }
+
+    #[test]
+    fn deps_and_callsites_tables_exist_after_v7() {
+        let conn = open_memory().unwrap();
+        for table in ["outline_deps", "outline_callsites"] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "table `{}` must exist after v7 migration", table);
+        }
     }
 
     #[test]

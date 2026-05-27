@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod config;
 mod db;
+mod explore_index;
 mod git;
 mod harness;
 mod models;
@@ -58,6 +59,8 @@ async fn main() {
         Command::Init { non_interactive } => commands::init::run(*non_interactive).map(|()| 0),
 
         c @ Command::Prepare { .. } => commands::prepare::run(c).await,
+
+        Command::Explore { command } => commands::explore::run(command).await,
     };
 
     match result {

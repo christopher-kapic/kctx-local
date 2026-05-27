@@ -27,6 +27,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         ),
         (
@@ -46,6 +47,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 model_args: vec!["--model={model}".to_string()],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         ),
         (
@@ -59,6 +61,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         ),
         (
@@ -73,6 +76,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 model_args: vec!["-m".to_string(), "{model}".to_string()],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         ),
         (
@@ -98,6 +102,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 model_args: vec!["-m".to_string(), "{model}".to_string()],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         ),
         (
@@ -120,6 +125,7 @@ fn known_harnesses() -> Vec<(&'static str, HarnessConfig)> {
                 model_args: vec!["--model".to_string(), "{model}".to_string()],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         ),
     ]
@@ -550,6 +556,7 @@ mod tests {
                         model_args: vec![],
                         default_model: None,
                         prepared_args: vec![],
+                        inject_explore_toolkit: true,
                     },
                 );
                 m
@@ -566,6 +573,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
         new_harnesses.insert(
@@ -577,6 +585,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
 
@@ -612,6 +621,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
 
@@ -719,6 +729,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
         config.clone_dir = "/my/custom/dir".to_string();
@@ -736,6 +747,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
         new_harnesses.insert(
@@ -747,6 +759,7 @@ mod tests {
                 model_args: vec![],
                 default_model: None,
                 prepared_args: vec![],
+                inject_explore_toolkit: true,
             },
         );
 
