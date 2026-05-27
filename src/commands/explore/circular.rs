@@ -33,25 +33,13 @@ pub fn run(package: Option<&str>, json: bool, max_bytes: usize) -> Result<i32> {
     let db_path = paths::db_file()?;
     let mut conn = db::open(&db_path)?;
 
-    // Cycle detection wants a coherent snapshot. Reindex any stale files
-    // before reading edges — otherwise we'd be reporting on an arbitrary
+    // Cycle detection wants a coherent snapshot. Bring stale files up to
+    // date before reading edges — otherwise we'd be reporting on an arbitrary
     // mix of old and new edges.
-    let plan = explore_index::compute_plan(&conn, &target.root)?;
+    if let Err(e) = explore_index::index_target(&mut conn, target.id.as_deref(), &target.root) {
+        eprintln!("warning: indexing failed: {:#}", e);
+    }
     let root_str = target.root.to_string_lossy().into_owned();
-    if !plan.removed.is_empty() {
-        let tx = conn.transaction()?;
-        for rel in &plan.removed {
-            store::delete_file(&tx, &root_str, &rel.to_string_lossy())?;
-        }
-        tx.commit()?;
-    }
-    for (rel, lang, _reason) in plan.to_index {
-        if let Err(e) =
-            explore_index::index_file(&mut conn, target.id.as_deref(), &target.root, &rel, lang)
-        {
-            eprintln!("warning: failed to index `{}`: {:#}", rel.display(), e);
-        }
-    }
 
     let edges = store::all_resolved_edges(&conn, &root_str)?;
     let cycles = find_cycles(&edges);

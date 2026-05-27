@@ -409,12 +409,7 @@ async fn run_after_prepare_checkout(args: RunAfterPrepareCheckout<'_>) -> Result
                 // mask a successful prepare with an error exit code.
                 let root =
                     std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
-                match crate::explore_index::index_target(
-                    &mut conn2,
-                    Some(pkg.id.as_str()),
-                    &root,
-                    |_p| {},
-                ) {
+                match crate::explore_index::index_target(&mut conn2, Some(pkg.id.as_str()), &root) {
                     Ok(stats) => {
                         eprintln!(
                             "indexed {} files ({} symbols, {} identifiers)",

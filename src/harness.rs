@@ -63,7 +63,11 @@ impl MapFreshness {
 /// `--max-bytes N` (cap response size), `--help` (full flag list).
 const EXPLORE_TOOLKIT_BLOCK: &str = concat!(
     "\n--- BEGIN EXPLORATION TOOLKIT ---\n",
-    "The `kcl explore` CLI is available on this machine and operates on the package in the current working directory. Prefer it over raw `grep`/`cat`/`find` whenever a primitive below fits — the index-backed commands return precise, structured answers far more cheaply than full-file reads.\n",
+    "The `kcl explore` CLI is available on this machine and operates on the package in the current working directory. It's index-backed and returns structured, precise answers far more cheaply than full-file reads — but it only helps for code questions, so don't reach for it indiscriminately.\n",
+    "\n",
+    "Reach for `kcl explore` when the question is about code: locating a definition, finding callers/usages, mapping structure, assessing change impact, or navigating an unfamiliar codebase.\n",
+    "\n",
+    "Stick with your built-in `Read`/`Grep`/`Glob` tools when: reading docs / READMEs / examples / config; opening a file whose path you already know; searching by filename or extension; or working in a small repo where indexing overhead isn't worth it. If a `kcl explore` call is taking noticeably long, fall back to `Grep`/`Read` rather than waiting.\n",
     "\n",
     "Common flags on every command: `--json` for structured output, `--max-bytes N` to cap response size, `--help` for full details.\n",
     "\n",

@@ -31,17 +31,11 @@ pub fn run(
     let db_path = paths::db_file()?;
     let mut conn = db::open(&db_path)?;
 
-    // Cheap-ish: bring stale files up to date before the query. We DO NOT do
-    // a full eager pass on first run — that's reserved for `kcl prepare`.
-    let plan = explore_index::compute_plan(&conn, &target.root)?;
-    if !plan.to_index.is_empty() {
-        for (rel, lang, _) in plan.to_index {
-            if let Err(e) =
-                explore_index::index_file(&mut conn, target.id.as_deref(), &target.root, &rel, lang)
-            {
-                eprintln!("warning: failed to index `{}`: {:#}", rel.display(), e);
-            }
-        }
+    // Bring stale files up to date before the query. On a cold cache this
+    // parses every indexable file in the repo in parallel; the shared helper
+    // emits a one-shot stderr progress line when the work is non-trivial.
+    if let Err(e) = explore_index::index_target(&mut conn, target.id.as_deref(), &target.root) {
+        eprintln!("warning: indexing failed: {:#}", e);
     }
 
     let root_str = target.root.to_string_lossy().into_owned();

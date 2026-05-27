@@ -18,13 +18,25 @@ pub mod store;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
 use ignore::WalkBuilder;
+use rayon::prelude::*;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 pub use parser::Language;
+
+/// Chunk size for the parallel parse → serial write pipeline. Bounds peak
+/// memory to roughly N files' worth of `ParsedFile` data at a time, while
+/// still giving rayon enough work per chunk to saturate cores on large repos.
+const PARSE_CHUNK_SIZE: usize = 200;
+
+/// Above this number of stale files in a single `bring_up_to_date` call we
+/// emit a one-shot stderr line so agents and humans know the cold-cache pass
+/// is doing real work (the symptom the Terraform-provider report identified —
+/// `kcl explore symbol` appearing to hang on first call).
+const COLD_PROGRESS_THRESHOLD: usize = 100;
 
 /// Files this large or larger are skipped (binary blobs, generated data, etc.).
 const MAX_INDEXABLE_BYTES: u64 = 5 * 1024 * 1024;
@@ -175,6 +187,108 @@ pub fn compute_plan(conn: &Connection, root: &Path) -> Result<Plan> {
     Ok(plan)
 }
 
+/// Parsed file + the metadata needed to upsert it. Produced by the
+/// parallel parse pass; consumed by the serial write pass in [`apply_plan`].
+struct ParsedFileEntry {
+    rel: PathBuf,
+    language: Language,
+    parsed: parser::ParsedFile,
+    hash: String,
+    mtime_ns: i64,
+    size: i64,
+}
+
+/// Outcome of trying to parse one stale file. `Skip` means the file isn't
+/// indexable (binary content, vanished from disk) — not an error.
+enum ParseOutcome {
+    Ok(ParsedFileEntry),
+    Skip,
+    Err(PathBuf, anyhow::Error),
+}
+
+/// Read + parse a single file. Pure CPU/IO with no DB access, so safe to
+/// run from a rayon worker thread.
+fn parse_one(root: &Path, rel: PathBuf, language: Language) -> ParseOutcome {
+    let abs = root.join(&rel);
+    let bytes = match std::fs::read(&abs) {
+        Ok(b) => b,
+        Err(e) => {
+            return ParseOutcome::Err(
+                rel,
+                anyhow::Error::new(e).context(format!("reading `{}` for indexing", abs.display())),
+            );
+        }
+    };
+    let source = match std::str::from_utf8(&bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => return ParseOutcome::Skip,
+    };
+    let meta = match std::fs::metadata(&abs) {
+        Ok(m) => m,
+        Err(e) => return ParseOutcome::Err(rel, anyhow::Error::new(e)),
+    };
+    let parsed = match parser::parse_file(language, &source) {
+        Ok(p) => p,
+        Err(e) => return ParseOutcome::Err(rel, e),
+    };
+    ParseOutcome::Ok(ParsedFileEntry {
+        rel,
+        language,
+        parsed,
+        hash: sha256_hex(&bytes),
+        mtime_ns: file_mtime_ns(&meta),
+        size: meta.len() as i64,
+    })
+}
+
+/// Write one parsed entry into an open transaction. Mirrors the old inline
+/// write block in `index_file`. Returns the per-file (symbols, imports,
+/// identifiers) counts so the caller can roll them into [`IndexStats`].
+fn write_entry(
+    tx: &rusqlite::Transaction<'_>,
+    package_id: Option<&str>,
+    root: &Path,
+    root_str: &str,
+    indexed_at: &str,
+    entry: &ParsedFileEntry,
+) -> Result<(usize, usize, usize)> {
+    let file_str = entry.rel.to_string_lossy().into_owned();
+    let pkg = package_id.unwrap_or("");
+
+    store::replace_file(
+        tx,
+        pkg,
+        root_str,
+        &file_str,
+        entry.language.as_str(),
+        entry.mtime_ns,
+        entry.size,
+        &entry.hash,
+        indexed_at,
+        &entry.parsed,
+    )?;
+    // Resolve each raw import to a concrete file under `root` (when
+    // possible) and persist as dep edges. Unresolved imports still get a
+    // row with `importee_file = NULL` so the agent can see them.
+    for imp in &entry.parsed.imports {
+        let resolved = resolver::resolve_import(root, &entry.rel, entry.language, &imp.target);
+        let importee_str = resolved.as_ref().map(|p| p.to_string_lossy().into_owned());
+        store::insert_dep(
+            tx,
+            root_str,
+            &file_str,
+            importee_str.as_deref(),
+            &imp.target,
+            imp.line,
+        )?;
+    }
+    Ok((
+        entry.parsed.symbols.len(),
+        entry.parsed.imports.len(),
+        entry.parsed.identifiers.len(),
+    ))
+}
+
 /// Parse + write rows for one file. Idempotent: replaces any existing rows
 /// for (root, file). Returns counts so callers can aggregate.
 pub fn index_file(
@@ -184,74 +298,37 @@ pub fn index_file(
     rel: &Path,
     language: Language,
 ) -> Result<(usize, usize, usize)> {
-    let abs = root.join(rel);
-    let bytes =
-        std::fs::read(&abs).with_context(|| format!("reading `{}` for indexing", abs.display()))?;
-    let source = match std::str::from_utf8(&bytes) {
-        Ok(s) => s.to_string(),
-        Err(_) => return Ok((0, 0, 0)), // binary file slipped through
+    let entry = match parse_one(root, rel.to_path_buf(), language) {
+        ParseOutcome::Ok(e) => e,
+        ParseOutcome::Skip => return Ok((0, 0, 0)),
+        ParseOutcome::Err(_, e) => return Err(e),
     };
-    let hash = sha256_hex(&bytes);
-    let meta = std::fs::metadata(&abs)?;
-    let mtime_ns = file_mtime_ns(&meta);
-    let size = meta.len() as i64;
-
-    let parsed = parser::parse_file(language, &source)?;
     let now = Utc::now().to_rfc3339();
     let root_str = root.to_string_lossy().into_owned();
-    let file_str = rel.to_string_lossy().into_owned();
-    let pkg = package_id.unwrap_or("");
-
     let tx = conn.transaction()?;
-    store::replace_file(
-        &tx,
-        pkg,
-        &root_str,
-        &file_str,
-        language.as_str(),
-        mtime_ns,
-        size,
-        &hash,
-        &now,
-        &parsed,
-    )?;
-    // Resolve each raw import to a concrete file under `root` (when
-    // possible) and persist as dep edges. Unresolved imports still get a
-    // row with `importee_file = NULL` so the agent can see them.
-    for imp in &parsed.imports {
-        let resolved = resolver::resolve_import(root, rel, language, &imp.target);
-        let importee_str = resolved.as_ref().map(|p| p.to_string_lossy().into_owned());
-        store::insert_dep(
-            &tx,
-            &root_str,
-            &file_str,
-            importee_str.as_deref(),
-            &imp.target,
-            imp.line,
-        )?;
-    }
+    let counts = write_entry(&tx, package_id, root, &root_str, &now, &entry)?;
     tx.commit()?;
-
-    Ok((
-        parsed.symbols.len(),
-        parsed.imports.len(),
-        parsed.identifiers.len(),
-    ))
+    Ok(counts)
 }
 
-/// Index every file the plan flags as stale. Failures are logged + skipped —
-/// one bad parse must not abort the whole run.
-pub fn index_target<F: FnMut(&Path)>(
+/// Apply a precomputed plan: evict removed files, then parse stale files in
+/// parallel and write them serially in chunked transactions.
+///
+/// The shape (parallel parse → serial write) exists because tree-sitter parses
+/// are CPU-bound and embarrassingly parallel, while rusqlite writes need a
+/// single connection. Chunking bounds peak memory at roughly
+/// `PARSE_CHUNK_SIZE` files' worth of `ParsedFile` data.
+fn apply_plan(
     conn: &mut Connection,
     package_id: Option<&str>,
     root: &Path,
-    mut progress: F,
+    plan: Plan,
 ) -> Result<IndexStats> {
-    let plan = compute_plan(conn, root)?;
     let mut stats = IndexStats::default();
     let root_str = root.to_string_lossy().into_owned();
 
-    // Evict files no longer on disk.
+    // Evict files no longer on disk first — keeps the index coherent even if
+    // the parse pass below fails partway through.
     if !plan.removed.is_empty() {
         let tx = conn.transaction()?;
         for rel in &plan.removed {
@@ -260,23 +337,76 @@ pub fn index_target<F: FnMut(&Path)>(
         tx.commit()?;
     }
 
-    for (rel, lang, _reason) in plan.to_index {
-        progress(&rel);
-        match index_file(conn, package_id, root, &rel, lang) {
-            Ok((s, i, d)) => {
-                stats.files_indexed += 1;
-                stats.symbols += s;
-                stats.imports += i;
-                stats.identifiers += d;
-            }
-            Err(e) => {
-                stats.files_failed += 1;
-                eprintln!("warning: failed to index `{}`: {:#}", rel.display(), e);
+    if plan.to_index.is_empty() {
+        return Ok(stats);
+    }
+
+    // One-shot stderr hint when the cold-cache work is non-trivial. The
+    // agent-facing complaint was "command hung for 30s" with no signal that
+    // work was happening — this line answers that. Goes to stderr so it
+    // doesn't pollute the structured stdout the commands emit.
+    if plan.to_index.len() >= COLD_PROGRESS_THRESHOLD {
+        eprintln!(
+            "indexing {} files for first-time lookup (run `kcl prepare` ahead of time to avoid this)…",
+            plan.to_index.len()
+        );
+    }
+
+    for chunk in plan.to_index.chunks(PARSE_CHUNK_SIZE) {
+        let outcomes: Vec<ParseOutcome> = chunk
+            .par_iter()
+            .map(|(rel, lang, _)| parse_one(root, rel.clone(), *lang))
+            .collect();
+
+        let now = Utc::now().to_rfc3339();
+        let tx = conn.transaction()?;
+        for outcome in outcomes {
+            match outcome {
+                ParseOutcome::Ok(entry) => {
+                    match write_entry(&tx, package_id, root, &root_str, &now, &entry) {
+                        Ok((s, i, d)) => {
+                            stats.files_indexed += 1;
+                            stats.symbols += s;
+                            stats.imports += i;
+                            stats.identifiers += d;
+                        }
+                        Err(e) => {
+                            stats.files_failed += 1;
+                            eprintln!(
+                                "warning: failed to write index rows for `{}`: {:#}",
+                                entry.rel.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+                ParseOutcome::Skip => {
+                    // Binary or empty-after-utf8-check; not counted as a failure.
+                }
+                ParseOutcome::Err(rel, e) => {
+                    stats.files_failed += 1;
+                    eprintln!("warning: failed to index `{}`: {:#}", rel.display(), e);
+                }
             }
         }
+        tx.commit()?;
     }
 
     Ok(stats)
+}
+
+/// Index every file the plan flags as stale. Failures are logged + skipped —
+/// one bad parse must not abort the whole run. Used both by `kcl prepare`
+/// (eager full-repo build) and by `kcl explore <cmd>` (lazy bring-up-to-date
+/// at command time). The cold-cache progress hint inside [`apply_plan`]
+/// makes the lazy path safe to invoke from a single command.
+pub fn index_target(
+    conn: &mut Connection,
+    package_id: Option<&str>,
+    root: &Path,
+) -> Result<IndexStats> {
+    let plan = compute_plan(conn, root)?;
+    apply_plan(conn, package_id, root, plan)
 }
 
 /// Lazy-fetch wrapper used by commands. If the file is not in the index OR
@@ -462,7 +592,7 @@ mod tests {
         .unwrap();
 
         let mut conn = db::open_memory().unwrap();
-        index_target(&mut conn, None, root, |_| {}).unwrap();
+        index_target(&mut conn, None, root).unwrap();
 
         let root_str = root.to_string_lossy().into_owned();
 
@@ -490,5 +620,47 @@ mod tests {
         let counts = store::symbol_counts_by_file(&conn, &root_str).unwrap();
         assert!(counts.get("a.rs").copied().unwrap_or(0) >= 3);
         assert!(counts.get("sub/b.rs").copied().unwrap_or(0) >= 2);
+    }
+
+    /// Cold-cache index pass over a fixture larger than the parallel chunk
+    /// size: every file gets indexed exactly once, counts roll up correctly,
+    /// and the file count crosses the progress threshold. (The threshold
+    /// stderr line itself isn't captured here — we exercise it from a CLI
+    /// smoke test instead since `eprintln!` doesn't go through any handle
+    /// we could intercept.)
+    #[test]
+    fn index_target_handles_more_files_than_chunk_size() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Two chunks' worth + a partial chunk — exercises the chunk loop's
+        // remainder handling. Also above COLD_PROGRESS_THRESHOLD so a real
+        // CLI run would emit the hint.
+        let n = (PARSE_CHUNK_SIZE * 2) + 17;
+        assert!(n > COLD_PROGRESS_THRESHOLD);
+        for i in 0..n {
+            std::fs::write(
+                root.join(format!("file_{i:04}.rs")),
+                format!("pub fn func_{i}() {{}}\npub struct Type_{i};\n"),
+            )
+            .unwrap();
+        }
+
+        let mut conn = db::open_memory().unwrap();
+        let stats = index_target(&mut conn, None, root).unwrap();
+        assert_eq!(stats.files_indexed, n);
+        assert_eq!(stats.files_failed, 0);
+        // Each fixture file declares exactly 2 symbols.
+        assert_eq!(stats.symbols, n * 2);
+
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM outline_files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(row_count as usize, n);
+
+        // Re-running with everything up to date is a no-op.
+        let stats2 = index_target(&mut conn, None, root).unwrap();
+        assert_eq!(stats2.files_indexed, 0);
+        assert_eq!(stats2.files_failed, 0);
     }
 }

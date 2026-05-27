@@ -30,15 +30,8 @@ pub fn run(
     let db_path = paths::db_file()?;
     let mut conn = db::open(&db_path)?;
 
-    let plan = explore_index::compute_plan(&conn, &target.root)?;
-    if !plan.to_index.is_empty() {
-        for (rel, lang, _) in plan.to_index {
-            if let Err(e) =
-                explore_index::index_file(&mut conn, target.id.as_deref(), &target.root, &rel, lang)
-            {
-                eprintln!("warning: failed to index `{}`: {:#}", rel.display(), e);
-            }
-        }
+    if let Err(e) = explore_index::index_target(&mut conn, target.id.as_deref(), &target.root) {
+        eprintln!("warning: indexing failed: {:#}", e);
     }
 
     let root_str = target.root.to_string_lossy().into_owned();

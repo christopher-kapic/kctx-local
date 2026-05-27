@@ -127,23 +127,11 @@ fn parse_direction(s: Option<&str>) -> Result<Direction> {
     }
 }
 
-/// Re-index any files the plan flags as stale. Failures are logged and
-/// skipped — we still want a partial answer.
+/// Re-index any files that are stale relative to the working tree. Failures
+/// are logged and skipped — we still want a partial answer.
 fn lazy_full_pass(conn: &mut Connection, root: &Path, package_id: Option<&str>) -> Result<()> {
-    let plan = explore_index::compute_plan(conn, root)?;
-    if plan.to_index.is_empty() && plan.removed.is_empty() {
-        return Ok(());
-    }
-    for rel_path in &plan.removed {
-        let root_str = root.to_string_lossy().into_owned();
-        let tx = conn.transaction()?;
-        store::delete_file(&tx, &root_str, &rel_path.to_string_lossy())?;
-        tx.commit()?;
-    }
-    for (rel_path, lang, _reason) in plan.to_index {
-        if let Err(e) = explore_index::index_file(conn, package_id, root, &rel_path, lang) {
-            eprintln!("warning: failed to index `{}`: {:#}", rel_path.display(), e);
-        }
+    if let Err(e) = explore_index::index_target(conn, package_id, root) {
+        eprintln!("warning: indexing failed: {:#}", e);
     }
     Ok(())
 }

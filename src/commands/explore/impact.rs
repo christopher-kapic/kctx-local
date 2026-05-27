@@ -61,22 +61,10 @@ pub fn run(
 
     // Bring stale files up to date so the impact answer reflects the
     // current working tree.
-    let plan = explore_index::compute_plan(&conn, &target.root)?;
+    if let Err(e) = explore_index::index_target(&mut conn, target.id.as_deref(), &target.root) {
+        eprintln!("warning: indexing failed: {:#}", e);
+    }
     let root_str = target.root.to_string_lossy().into_owned();
-    if !plan.removed.is_empty() {
-        let tx = conn.transaction()?;
-        for rel in &plan.removed {
-            store::delete_file(&tx, &root_str, &rel.to_string_lossy())?;
-        }
-        tx.commit()?;
-    }
-    for (rel, lang, _reason) in plan.to_index {
-        if let Err(e) =
-            explore_index::index_file(&mut conn, target.id.as_deref(), &target.root, &rel, lang)
-        {
-            eprintln!("warning: failed to index `{}`: {:#}", rel.display(), e);
-        }
-    }
 
     let hops = hops.unwrap_or(DEFAULT_HOPS).clamp(1, MAX_HOPS);
 
