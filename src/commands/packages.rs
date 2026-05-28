@@ -57,13 +57,15 @@ pub async fn run(command: &PackagesCommand) -> Result<()> {
         PackagesCommand::Add {
             identifier,
             path,
+            current_path,
             git,
             branch,
             shallow,
         } => {
+            let resolved_path = resolve_add_path(path.as_deref(), *current_path)?;
             cmd_add(
                 identifier,
-                path.as_deref(),
+                resolved_path.as_deref(),
                 git.as_deref(),
                 branch.as_deref(),
                 *shallow,
@@ -150,10 +152,11 @@ async fn cmd_add(
 ) -> Result<()> {
     validate_identifier(identifier)?;
 
-    // Validate: must supply --path or --git (or both for tracking existing clone with remote).
+    // Validate: must supply --path, --current-path, or --git (or path+git for
+    // tracking an existing clone with a known remote).
     if path.is_none() && git.is_none() {
         bail!(
-            "Must specify --path or --git (or both). Examples:\n  kcl packages add {identifier} --path /path/to/codebase\n  kcl packages add {identifier} --git https://github.com/user/repo.git"
+            "Must specify --path, --current-path, or --git (or pair --path/--current-path with --git). Examples:\n  kcl packages add {identifier} --path /path/to/codebase\n  kcl packages add {identifier} --current-path\n  kcl packages add {identifier} --git https://github.com/user/repo.git"
         );
     }
 
@@ -340,6 +343,19 @@ fn expand_tilde(path: &str) -> Result<std::path::PathBuf> {
         Ok(home)
     } else {
         Ok(std::path::PathBuf::from(path))
+    }
+}
+
+/// Resolve the `--path` / `--current-path` pair into a single optional path
+/// string for `cmd_add`. Clap rejects passing both flags at once, so at most
+/// one of `path` and `current_path` is set on entry.
+fn resolve_add_path(path: Option<&str>, current_path: bool) -> Result<Option<String>> {
+    if current_path {
+        let cwd = std::env::current_dir()
+            .context("failed to read current directory for `--current-path`")?;
+        Ok(Some(cwd.to_string_lossy().into_owned()))
+    } else {
+        Ok(path.map(String::from))
     }
 }
 
@@ -815,6 +831,28 @@ mod tests {
         );
         pkg.insert(&conn).unwrap();
         (conn, pkg)
+    }
+
+    #[test]
+    fn resolve_add_path_passes_through_explicit_path() {
+        let result = resolve_add_path(Some("/some/path"), false).unwrap();
+        assert_eq!(result.as_deref(), Some("/some/path"));
+    }
+
+    #[test]
+    fn resolve_add_path_returns_none_when_neither_flag_set() {
+        let result = resolve_add_path(None, false).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_add_path_uses_cwd_when_current_path_set() {
+        let expected = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let result = resolve_add_path(None, true).unwrap();
+        assert_eq!(result, Some(expected));
     }
 
     #[test]

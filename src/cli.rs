@@ -430,6 +430,11 @@ pub enum PackagesCommand {
         #[arg(long)]
         path: Option<String>,
 
+        /// Use the current working directory as the package path
+        /// (shorthand for `--path "$(pwd)"`).
+        #[arg(long, conflicts_with = "path")]
+        current_path: bool,
+
         /// Git URL to clone
         #[arg(long)]
         git: Option<String>,
