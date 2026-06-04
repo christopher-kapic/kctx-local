@@ -56,6 +56,10 @@ async fn main() {
 
         Command::Harnesses { command } => commands::harnesses::run(command).map(|()| 0),
 
+        Command::Prune { days, dry_run } => commands::prune::run(*days, *dry_run).map(|()| 0),
+
+        Command::Agents { topic } => commands::agents::run(*topic).map(|()| 0),
+
         Command::Init { non_interactive } => commands::init::run(*non_interactive).map(|()| 0),
 
         c @ Command::Prepare { .. } => commands::prepare::run(c).await,

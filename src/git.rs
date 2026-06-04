@@ -288,6 +288,33 @@ pub async fn current_commit_sha(repo_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Return true if the repository at `repo_path` is a shallow clone (its
+/// history is truncated). Runs `git -C <repo_path> rev-parse
+/// --is-shallow-repository` and checks whether the trimmed stdout is `true`.
+///
+/// Returns an error on non-success exit or spawn failure — callers that want
+/// a best-effort answer should use `.unwrap_or(false)`.
+pub async fn is_shallow_repository(repo_path: &Path) -> Result<bool> {
+    check_git()?;
+
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg("--is-shallow-repository")
+        .output()
+        .await
+        .context("failed to execute git rev-parse --is-shallow-repository")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "git rev-parse --is-shallow-repository failed: {}",
+            stderr.trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim() == "true")
+}
+
 /// Return how many commits exist between `base_sha` and `head_sha` (i.e. the
 /// number of commits `head_sha` is ahead of `base_sha`). Returns 0 when they
 /// are the same or when the range cannot be computed. Used for the "N commits
@@ -757,6 +784,17 @@ mod tests {
         // current_branch returns None for detached HEAD.
         let branch = current_branch(&tmp).await.unwrap();
         assert_eq!(branch, None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn is_shallow_repository_false_for_normal_repo() {
+        let tmp = std::env::temp_dir().join("kcl-test-is-shallow-normal");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (_first, _second) = init_repo_with_two_commits(&tmp).await;
+
+        assert_eq!(is_shallow_repository(&tmp).await.unwrap(), false);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

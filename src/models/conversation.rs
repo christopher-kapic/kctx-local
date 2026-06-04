@@ -103,6 +103,27 @@ impl Conversation {
         Ok(questions)
     }
 
+    /// Return the timestamp of the most recent conversation for a package, or
+    /// `None` if the package has no conversations. Used by `kcl prune` to
+    /// decide whether an on-disk clone has gone stale.
+    pub fn last_activity_at(conn: &Connection, package_id: &str) -> Result<Option<DateTime<Utc>>> {
+        // MAX(created_at) returns SQL NULL when there are no matching rows, so
+        // the column reads as Option<String>.
+        let max: Option<String> = conn.query_row(
+            "SELECT MAX(created_at) FROM conversations WHERE package_id = ?1",
+            params![package_id],
+            |row| row.get(0),
+        )?;
+        match max {
+            None => Ok(None),
+            Some(s) => Ok(Some(
+                DateTime::parse_from_rfc3339(&s)
+                    .context("invalid created_at")?
+                    .with_timezone(&Utc),
+            )),
+        }
+    }
+
     /// List conversations for a package with optional filters.
     pub fn list_filtered(
         conn: &Connection,
@@ -231,6 +252,43 @@ mod tests {
         // Most recent first.
         assert_eq!(conversations[0].question, "What is middleware?");
         assert_eq!(conversations[1].question, "How does routing work?");
+    }
+
+    #[test]
+    fn last_activity_at_none_without_conversations() {
+        let conn = db::open_memory().unwrap();
+        let pkg = insert_test_package(&conn, "no-activity");
+        assert!(
+            Conversation::last_activity_at(&conn, &pkg.id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn last_activity_at_returns_most_recent() {
+        let conn = db::open_memory().unwrap();
+        let pkg = insert_test_package(&conn, "has-activity");
+
+        for i in 0..3 {
+            let conv = Conversation::new(
+                pkg.id.clone(),
+                format!("Question {}", i),
+                "claude".to_string(),
+                Some(0),
+                format!("/tmp/logs/conv{}.json", i),
+                None,
+                None,
+            );
+            conv.insert(&conn).unwrap();
+        }
+
+        let max = Conversation::last_activity_at(&conn, &pkg.id)
+            .unwrap()
+            .expect("should have activity");
+        // The MAX must equal the latest conversation's created_at.
+        let all = Conversation::list_by_package(&conn, &pkg.id).unwrap();
+        assert_eq!(max, all[0].created_at);
     }
 
     #[test]

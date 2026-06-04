@@ -195,6 +195,26 @@ impl Config {
         }
     }
 
+    /// Resolve the configured clone_dir, expanding a leading `~`.
+    ///
+    /// Shared by `kcl packages` (add/remove) and `kcl prune` so the
+    /// "is this path a kcl-managed clone inside clone_dir" check is computed
+    /// the same way everywhere. Returns an error if `clone_dir` starts with
+    /// `~` but the home directory cannot be determined.
+    pub fn resolved_clone_dir(&self) -> Result<std::path::PathBuf> {
+        if let Some(rest) = self.clone_dir.strip_prefix("~/") {
+            let home = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("cannot expand `~`: home directory not found"))?;
+            Ok(home.join(rest))
+        } else if self.clone_dir == "~" {
+            let home = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("cannot expand `~`: home directory not found"))?;
+            Ok(home)
+        } else {
+            Ok(std::path::PathBuf::from(&self.clone_dir))
+        }
+    }
+
     /// Save config to the given path, creating parent directories as needed.
     /// Uses atomic temp-file + rename to prevent corruption on crash.
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -436,6 +456,35 @@ mod tests {
         let config = Config::default();
         let err = validate_harness_configured(&config, "anything").unwrap_err();
         assert!(err.to_string().contains("none configured"));
+    }
+
+    #[test]
+    fn resolved_clone_dir_expands_tilde_prefix() {
+        let mut config = Config::default();
+        config.clone_dir = "~/src/kcl-packages".to_string();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            config.resolved_clone_dir().unwrap(),
+            home.join("src/kcl-packages")
+        );
+    }
+
+    #[test]
+    fn resolved_clone_dir_expands_bare_tilde() {
+        let mut config = Config::default();
+        config.clone_dir = "~".to_string();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(config.resolved_clone_dir().unwrap(), home);
+    }
+
+    #[test]
+    fn resolved_clone_dir_passes_through_absolute_path() {
+        let mut config = Config::default();
+        config.clone_dir = "/tmp/clones".to_string();
+        assert_eq!(
+            config.resolved_clone_dir().unwrap(),
+            std::path::PathBuf::from("/tmp/clones")
+        );
     }
 
     #[test]

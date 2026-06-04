@@ -260,7 +260,7 @@ async fn cmd_add(
             // pass --branch we let git pick the remote's default branch
             // instead of hard-coding "main".
             let config = Config::load_or_default()?;
-            let clone_dir = expand_tilde(&config.clone_dir)?;
+            let clone_dir = config.resolved_clone_dir()?;
             let pkg_dir = clone_dir.join(paths::package_storage_name(identifier));
 
             if pkg_dir.exists() {
@@ -454,7 +454,7 @@ fn cmd_remove(identifier: &str) -> Result<()> {
             // identifier owns the on-disk clone and later ones reuse its
             // path, so removing any one of them must not orphan the others.
             let config = Config::load_or_default()?;
-            let clone_dir = expand_tilde(&config.clone_dir)?;
+            let clone_dir = config.resolved_clone_dir()?;
             let pkg_path = std::path::PathBuf::from(&pkg.path);
             let inside_clone_dir = pkg_path.starts_with(&clone_dir);
             let still_referenced = Package::count_by_path(&conn, &pkg.path)? > 0;

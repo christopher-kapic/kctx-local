@@ -140,6 +140,32 @@ pub async fn run(args: AskArgs<'_>) -> Result<i32> {
     let effective_branch: Option<&str> =
         resolve_target_branch(branch_override, pkg.source_branch.as_deref());
 
+    // Re-clone-on-ask: a `kcl prune` may have deleted the on-disk clone of a
+    // git package to reclaim disk while leaving its DB row intact. When the
+    // package is git-backed, has a source URL, and its path lives inside the
+    // configured clone_dir (i.e. kcl owns it — we NEVER touch a user-managed
+    // `--path --git` checkout outside clone_dir), transparently re-clone it if
+    // the directory is missing. The clone is always shallow because a pruned
+    // clone is a disposable cache; `pkg.shallow` (registration intent) is left
+    // unchanged — on-disk shallowness is detected separately below.
+    if pkg.source_type == SourceType::Git
+        && let Some(url) = pkg.source_url.as_deref()
+    {
+        let clone_dir = config.resolved_clone_dir()?;
+        let pkg_path = Path::new(&pkg.path);
+        if pkg_path.starts_with(&clone_dir) && !pkg_path.exists() {
+            eprintln!("re-cloning pruned package `{}` ...", pkg.identifier);
+            if let Err(e) = git::clone(url, pkg_path, pkg.source_branch.as_deref(), true).await {
+                // Clean up any partial directory so a retry starts fresh.
+                if pkg_path.exists() {
+                    let _ = std::fs::remove_dir_all(pkg_path);
+                }
+                return Err(e);
+            }
+            eprintln!("re-cloned `{}`", pkg.identifier);
+        }
+    }
+
     // If an effective branch is resolved AND it differs from the package's
     // current branch, check it out (saving the current HEAD state so we can
     // restore it after the harness runs, including the case where the
@@ -297,6 +323,16 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
     let current_head_sha = pre_harness_sha.clone();
     let current_branch = pre_harness_branch.clone();
 
+    // Detect on-disk shallowness (git packages only, best-effort) so the prompt
+    // can warn the harness and grant it permission to deepen. This is separate
+    // from `pkg.shallow` (registration intent): a re-cloned pruned package is
+    // always shallow on disk regardless of how it was originally registered.
+    let shallow = if pkg.source_type == SourceType::Git {
+        git::is_shallow_repository(repo_path).await.unwrap_or(false)
+    } else {
+        false
+    };
+
     // Load the applicable prepared orientation map (global vs per-branch)
     // using the getters provided by the model. Errors are ignored (graceful).
     let prepared_context: Option<PreparedContext> = if pkg.wants_per_branch_prepare() {
@@ -358,6 +394,7 @@ async fn run_after_checkout(args: RunAfterCheckout<'_>) -> Result<i32> {
         current_head_sha.as_deref(),
         commits_behind,
         harness_config.inject_explore_toolkit,
+        shallow,
     );
 
     // Release the DB connection before the long-running harness invocation so

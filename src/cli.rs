@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -131,6 +131,24 @@ pub enum Command {
         command: HarnessesCommand,
     },
 
+    /// Delete on-disk clones of git packages not asked about in N days (re-cloned on demand).
+    Prune {
+        /// Prune clones with no activity in the last N days
+        #[arg(long, default_value = "30")]
+        days: u32,
+
+        /// Show what would be pruned without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Print agent-oriented guidance for using kcl (how to ask, plus per-area
+    /// instructions). Run bare for an overview, or pass a topic for detail.
+    Agents {
+        /// Optional topic: add, remove, prune, config. Omit for the overview.
+        topic: Option<AgentsTopic>,
+    },
+
     /// Initialize kcl (creates config + db)
     Init {
         /// Skip prompts, use auto-detected defaults
@@ -150,6 +168,20 @@ pub enum Command {
         #[command(subcommand)]
         command: ExploreCommand,
     },
+}
+
+/// Topic for `kcl agents <topic>` — selects which area of agent guidance to
+/// print. Omitting the topic prints the overview.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum AgentsTopic {
+    /// Registering packages (`kcl packages add`).
+    Add,
+    /// Removing packages (`kcl packages remove` / `rm`).
+    Remove,
+    /// Reclaiming disk for unused clones (`kcl prune`).
+    Prune,
+    /// What to do when kcl fails (harness / config issues).
+    Config,
 }
 
 /// Subcommands of `kcl explore`.
@@ -451,6 +483,7 @@ pub enum PackagesCommand {
     },
 
     /// Remove a package
+    #[command(visible_alias = "rm")]
     Remove {
         /// Package identifier
         identifier: String,

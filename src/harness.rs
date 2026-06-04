@@ -102,6 +102,11 @@ const EXPLORE_TOOLKIT_BLOCK: &str = concat!(
 /// When `inject_toolkit` is true, an inline summary of the `kcl explore`
 /// toolbox is appended after the prepared map (if any) and before the closing
 /// instruction so the harness sees the navigation primitives it has access to.
+///
+/// When `shallow` is true (the on-disk clone is a shallow/depth-truncated
+/// clone), a note is injected near the top of the prompt granting the harness
+/// permission to deepen the history itself if the question requires more than
+/// the current branch tip.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prompt(
     display_name: &str,
@@ -112,6 +117,7 @@ pub fn build_prompt(
     current_commit_sha: Option<&str>,
     commits_behind: Option<usize>,
     inject_toolkit: bool,
+    shallow: bool,
 ) -> String {
     let mut prompt = format!(
         concat!(
@@ -120,6 +126,14 @@ pub fn build_prompt(
         ),
         display_name, identifier
     );
+
+    // Shallow-clone note: warn the harness that history is truncated and grant
+    // it permission to deepen the clone itself if it needs more than the tip.
+    if shallow {
+        prompt.push_str(
+            "\nNote: this repository is a shallow clone — its history is truncated (only the tip commit of each branch is present). If answering requires git history, blame, or a version other than the current branch tip, you have permission to deepen it yourself by running `git fetch --unshallow` (or `git fetch --deepen=N`) inside the repository before proceeding.\n",
+        );
+    }
 
     // Single freshness classification shared by the in-map directive and the
     // closing instruction so they cannot contradict. `None` ⇔ no prepared map.
@@ -564,6 +578,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         );
 
         assert!(prompt.contains("Axum (axum)"));
@@ -593,6 +608,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         );
 
         assert!(prompt.contains("Axum (axum)"));
@@ -614,6 +630,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         );
 
         // Empty context list should not produce the context block
@@ -631,6 +648,7 @@ mod tests {
             None,
             None,
             true,
+            false,
         );
         assert!(prompt.contains("--- BEGIN EXPLORATION TOOLKIT ---"));
         assert!(prompt.contains("--- END EXPLORATION TOOLKIT ---"));
@@ -676,9 +694,21 @@ mod tests {
 
     #[test]
     fn prompt_omits_toolkit_when_flag_is_false() {
-        let prompt = build_prompt("Axum", "axum", "q", None, None, None, None, false);
+        let prompt = build_prompt("Axum", "axum", "q", None, None, None, None, false, false);
         assert!(!prompt.contains("BEGIN EXPLORATION TOOLKIT"));
         assert!(!prompt.contains("kcl explore tree"));
+    }
+
+    #[test]
+    fn prompt_injects_shallow_note_only_when_shallow() {
+        let note = "this repository is a shallow clone";
+        // shallow = true: the deepen-permission note is present.
+        let with = build_prompt("Axum", "axum", "q", None, None, None, None, false, true);
+        assert!(with.contains(note));
+        assert!(with.contains("git fetch --unshallow"));
+        // shallow = false: the note is absent.
+        let without = build_prompt("Axum", "axum", "q", None, None, None, None, false, false);
+        assert!(!without.contains(note));
     }
 
     #[test]
@@ -1038,6 +1068,7 @@ mod tests {
             Some("abc123def456"),
             Some(0),
             false,
+            false,
         );
 
         assert!(prompt.contains("--- BEGIN PREPARED ORIENTATION MAP ---"));
@@ -1079,7 +1110,7 @@ mod tests {
 
     #[test]
     fn prompt_closing_unconditional_when_no_map() {
-        let prompt = build_prompt("Axum", "axum", "q", None, None, None, None, false);
+        let prompt = build_prompt("Axum", "axum", "q", None, None, None, None, false, false);
         assert!(
             prompt.contains("Explore the codebase and answer precisely. Reference file paths.")
         );
@@ -1097,6 +1128,7 @@ mod tests {
             Some(&p),
             Some("def456"),
             Some(3),
+            false,
             false,
         );
         assert!(prompt.contains("a few commits behind"));
@@ -1120,6 +1152,7 @@ mod tests {
             Some("def456"),
             None,
             false,
+            false,
         );
         assert!(prompt.contains("may be stale"));
         assert!(prompt.contains("explore the codebase to verify and answer precisely"));
@@ -1140,6 +1173,7 @@ mod tests {
             Some(&p),
             Some("def456"),
             Some(99),
+            false,
             false,
         );
         assert!(prompt.contains("may be stale"));
